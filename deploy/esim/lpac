@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+LPAC_HOME="${LPAC_HOME:-/opt/lpac}"
+LD_LIBRARY_PATH="${LPAC_HOME}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+export LD_LIBRARY_PATH
+
+exec "${LPAC_HOME}/bin/lpac" "$@"

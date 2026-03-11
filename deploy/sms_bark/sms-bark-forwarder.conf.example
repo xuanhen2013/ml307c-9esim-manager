@@ -1,0 +1,10 @@
+# Copy to /etc/sms-bark-forwarder.conf and replace the values below.
+MODEM_ID=any
+BARK_BASE_URL=https://api.day.app
+BARK_DEVICE_KEY=replace-with-your-bark-key
+BARK_GROUP=sms
+BARK_LEVEL=active
+# Optional: https://example.com/icon.png
+BARK_ICON=
+# Forward only these ModemManager SMS states, comma-separated.
+FORWARD_SMS_STATES=received

@@ -1,0 +1,14 @@
+[Unit]
+Description=4G WiFi Web Admin
+After=network-online.target ModemManager.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /usr/local/bin/4g_wifi_admin.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
