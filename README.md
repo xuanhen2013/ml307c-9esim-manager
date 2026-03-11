@@ -155,7 +155,31 @@ sudo sh ./deploy/install.sh
 - 这个脚本不会帮你安装 `ModemManager`、`qmicli`、`nmcli`、`lpac`
 - 如果 Bark 还是示例配置值，脚本会跳过启动 `sms-bark-forwarder.service`
 - eSIM 切卡依赖 `/opt/lpac/bin/lpac` 已经存在
-### 4. 部署后端与短信转发脚本
+
+### 4. GitHub Actions 自动构建部署包
+
+仓库已经包含 GitHub Actions 工作流：
+
+- push 到 `main` 时自动构建
+- 支持手动触发 `workflow_dispatch`
+- 自动执行前端 `lint`、`build`
+- 自动校验 Python 脚本语法
+- 自动生成 Debian 可用的部署包 zip
+
+生成后的产物可以在 GitHub 仓库的 Actions 页面下载，默认会输出：
+
+- `eSIM-SMS-Forwarder-deploy-<commit-sha>.zip`
+- `eSIM-SMS-Forwarder-deploy-latest.zip`
+
+下载后在 Debian 设备上解压并执行：
+
+```bash
+unzip eSIM-SMS-Forwarder-deploy-latest.zip
+cd eSIM-SMS-Forwarder-deploy-latest
+sudo sh ./deploy/install.sh
+```
+
+### 5. 部署后端与短信转发脚本
 
 把以下文件复制到 Debian 设备：
 
@@ -169,7 +193,7 @@ sudo sh ./deploy/install.sh
 - `deploy/web_admin/4g-wifi-admin.service` -> `/etc/systemd/system/4g-wifi-admin.service`
 - `deploy/sms_bark/sms-bark-forwarder.service` -> `/etc/systemd/system/sms-bark-forwarder.service`
 
-### 5. 配置 Bark
+### 6. 配置 Bark
 
 参考示例文件：
 
@@ -192,7 +216,7 @@ BARK_LEVEL=active
 FORWARD_SMS_STATES=received
 ```
 
-### 6. 启动服务
+### 7. 启动服务
 
 ```bash
 systemctl daemon-reload
@@ -202,7 +226,7 @@ systemctl restart 4g-wifi-admin.service
 systemctl restart sms-bark-forwarder.service
 ```
 
-### 7. 打开 Web 页面
+### 8. 打开 Web 页面
 
 默认监听端口为 `8080`：
 

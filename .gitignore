@@ -1,2 +1,4 @@
 __pycache__/
 *.pyc
+dist/
+eSIM-SMS-Forwarder-deploy-*.zip

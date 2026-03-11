@@ -1,0 +1,66 @@
+name: Build Deploy Package
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint frontend
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Validate Python scripts
+        run: |
+          python -m py_compile deploy/web_admin/4g_wifi_admin.py
+          python -m py_compile deploy/sms_bark/sms_forwarder.py
+
+      - name: Sync built frontend into deploy assets
+        run: |
+          rm -rf deploy/web_admin/frontend_dist
+          mkdir -p deploy/web_admin/frontend_dist
+          cp -a frontend/dist/. deploy/web_admin/frontend_dist/
+
+      - name: Build deploy zip
+        run: |
+          python scripts/build_deploy_package.py \
+            --output dist/eSIM-SMS-Forwarder-deploy-${{ github.sha }}.zip \
+            --copy-to dist/eSIM-SMS-Forwarder-deploy-latest.zip
+
+      - name: Upload deploy artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: eSIM-SMS-Forwarder-deploy-${{ github.sha }}
+          path: |
+            dist/eSIM-SMS-Forwarder-deploy-${{ github.sha }}.zip
+            dist/eSIM-SMS-Forwarder-deploy-latest.zip
+          if-no-files-found: error
