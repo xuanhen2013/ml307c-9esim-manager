@@ -3,8 +3,7 @@ set -eu
 
 REPO_OWNER="${REPO_OWNER:-cyDione}"
 REPO_NAME="${REPO_NAME:-eSIM-SMS-Forwarder}"
-RELEASE_TAG="${RELEASE_TAG:-latest}"
-ASSET_NAME="${ASSET_NAME:-eSIM-SMS-Forwarder-deploy-latest.zip}"
+ASSET_NAME="${ASSET_NAME:-eSIM-SMS-Forwarder-deploy.zip}"
 
 TMP_DIR=""
 
@@ -96,7 +95,7 @@ main() {
     extract_dir="${TMP_DIR}/package"
     mkdir -p "${extract_dir}"
 
-    release_url="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${RELEASE_TAG}/${ASSET_NAME}"
+    release_url="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest/download/${ASSET_NAME}"
     source_url="https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/zip/refs/heads/main"
 
     log "尝试下载最新发布包"

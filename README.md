@@ -137,8 +137,10 @@ curl -fsSL https://raw.githubusercontent.com/cyDione/eSIM-SMS-Forwarder/main/scr
 
 - 优先下载 GitHub Release 中最新构建好的部署包
 - 如果最新 Release 暂时不可用，则自动回退到 `main` 分支源码包
+- 自动进行环境检查，识别系统、架构、systemd 和依赖状态
 - 自动解压并执行 `deploy/install.sh`
 - 自动补齐 Debian 常用依赖：`python3`、`curl`、`unzip`、`modemmanager`、`network-manager`、`libqmi-utils`
+- 对 `aarch64 / arm64` 设备自动安装内置的 `lpac`
 - 自动安装并启动服务
 
 如果你更想手动下载仓库后再安装，也可以这样做：
@@ -168,7 +170,8 @@ sudo sh ./deploy/install.sh
 
 - 这个脚本会自动安装 `ModemManager`、`qmicli`、`nmcli` 对应的 Debian 包
 - 如果 Bark 还是示例配置值，脚本会跳过启动 `sms-bark-forwarder.service`
-- eSIM 切卡依赖 `/opt/lpac/bin/lpac` 已经存在
+- 对 `aarch64 / arm64` 设备会自动安装 `lpac` 到 `/opt/lpac/bin/lpac`
+- 如果是其他架构，安装脚本会跳过 `lpac` 自动安装并给出提示
 
 ### 4. GitHub Actions 自动构建部署包
 
@@ -182,14 +185,13 @@ sudo sh ./deploy/install.sh
 
 生成后的产物可以在 GitHub 仓库的 Actions 页面下载，默认会输出：
 
-- `eSIM-SMS-Forwarder-deploy-<commit-sha>.zip`
-- `eSIM-SMS-Forwarder-deploy-latest.zip`
+- `eSIM-SMS-Forwarder-deploy-<版本号>.zip`
+- `eSIM-SMS-Forwarder-deploy.zip`
 
 下载后在 Debian 设备上解压并执行：
 
 ```bash
-unzip eSIM-SMS-Forwarder-deploy-latest.zip
-cd eSIM-SMS-Forwarder-deploy-latest
+unzip eSIM-SMS-Forwarder-deploy.zip
 sudo sh ./deploy/install.sh
 ```
 

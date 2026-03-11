@@ -12,6 +12,7 @@ SMS_SERVICE_SRC="${SCRIPT_DIR}/sms_bark/sms-bark-forwarder.service"
 SMS_CONFIG_EXAMPLE_SRC="${SCRIPT_DIR}/sms_bark/sms-bark-forwarder.conf.example"
 LPAC_SWITCH_SRC="${SCRIPT_DIR}/esim/lpac-switch.sh"
 LPAC_WRAPPER_SRC="${SCRIPT_DIR}/esim/lpac"
+LPAC_BUNDLE_AARCH64_SRC="${SCRIPT_DIR}/esim/lpac-linux-aarch64-with-qmi.zip"
 
 WEB_ADMIN_DST="/usr/local/bin/4g_wifi_admin.py"
 SMS_FORWARDER_DST="/usr/local/bin/sms_forwarder.py"
@@ -21,6 +22,7 @@ FRONTEND_DIST_DST="/usr/local/bin/frontend_dist"
 WEB_ADMIN_SERVICE_DST="/etc/systemd/system/4g-wifi-admin.service"
 SMS_SERVICE_DST="/etc/systemd/system/sms-bark-forwarder.service"
 SMS_CONFIG_DST="/etc/sms-bark-forwarder.conf"
+LPAC_HOME_DST="/opt/lpac"
 
 log() {
     printf '%s\n' "[install] $*"
@@ -57,6 +59,35 @@ copy_frontend_dist() {
     rm -rf "${FRONTEND_DIST_DST}"
     mkdir -p "${FRONTEND_DIST_DST}"
     cp -a "${FRONTEND_DIST_SRC}/." "${FRONTEND_DIST_DST}/"
+}
+
+check_environment() {
+    ARCH=$(uname -m 2>/dev/null || echo unknown)
+    OS_ID=unknown
+    OS_VERSION=unknown
+
+    if [ -r /etc/os-release ]; then
+        OS_ID=$(sed -n 's/^ID=//p' /etc/os-release | tr -d '"')
+        OS_VERSION=$(sed -n 's/^VERSION_ID=//p' /etc/os-release | tr -d '"')
+    fi
+
+    log "环境检查: 架构=${ARCH}, 系统=${OS_ID}, 版本=${OS_VERSION}"
+
+    if ! command -v systemctl >/dev/null 2>&1; then
+        die "未检测到 systemctl，当前系统不支持 systemd 部署方式"
+    fi
+
+    if [ ! -d /run/systemd/system ]; then
+        warn "systemd 运行目录不存在，服务安装后可能无法立即启动"
+    fi
+
+    case "${OS_ID}" in
+        debian|ubuntu)
+            ;;
+        *)
+            warn "当前系统不是 Debian/Ubuntu，自动安装依赖步骤可能不适配"
+            ;;
+    esac
 }
 
 ensure_config() {
@@ -136,6 +167,64 @@ install_system_packages() {
     apt-get install -y ${missing_packages}
 }
 
+extract_lpac_bundle() {
+    archive=$1
+    target_dir=$2
+    mkdir -p "${target_dir}"
+
+    if command -v unzip >/dev/null 2>&1; then
+        unzip -oq "${archive}" -d "${target_dir}"
+        return 0
+    fi
+
+    python3 - "$archive" "$target_dir" <<'PY'
+import sys
+from zipfile import ZipFile
+
+archive, target = sys.argv[1], sys.argv[2]
+ZipFile(archive).extractall(target)
+PY
+}
+
+install_lpac() {
+    ARCH=$(uname -m 2>/dev/null || echo unknown)
+
+    if [ -x "${LPAC_HOME_DST}/bin/lpac" ]; then
+        log "检测到已安装 lpac: ${LPAC_HOME_DST}/bin/lpac"
+        return
+    fi
+
+    case "${ARCH}" in
+        aarch64|arm64)
+            require_file "${LPAC_BUNDLE_AARCH64_SRC}"
+            ;;
+        *)
+            warn "当前架构 ${ARCH} 没有内置 lpac 安装包，跳过自动安装"
+            return
+            ;;
+    esac
+
+    log "自动安装 lpac 到 ${LPAC_HOME_DST}"
+    tmp_dir=$(mktemp -d /tmp/lpac-install.XXXXXX)
+    extract_lpac_bundle "${LPAC_BUNDLE_AARCH64_SRC}" "${tmp_dir}"
+
+    mkdir -p "${LPAC_HOME_DST}/bin" "${LPAC_HOME_DST}/share/licenses"
+    install -m 755 "${tmp_dir}/lpac" "${LPAC_HOME_DST}/bin/lpac"
+
+    for license_name in LICENSE-cjson LICENSE-dlfcn-win32 LICENSE-libeuicc LICENSE-lpac; do
+        if [ -f "${tmp_dir}/${license_name}" ]; then
+            install -m 644 "${tmp_dir}/${license_name}" "${LPAC_HOME_DST}/share/licenses/${license_name}"
+        fi
+    done
+
+    if [ -f "${tmp_dir}/README.md" ]; then
+        install -m 644 "${tmp_dir}/README.md" "${LPAC_HOME_DST}/README.md"
+    fi
+
+    rm -rf "${tmp_dir}"
+    log "lpac 安装完成"
+}
+
 main() {
     require_root
 
@@ -147,7 +236,9 @@ main() {
     require_file "${LPAC_SWITCH_SRC}"
     require_file "${LPAC_WRAPPER_SRC}"
 
+    check_environment
     install_system_packages
+    install_lpac
 
     mkdir -p /usr/local/bin /etc/systemd/system
 

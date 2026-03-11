@@ -18,6 +18,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Generate version
+        id: version
+        run: |
+          build_time=$(TZ=Asia/Shanghai date +'%Y.%m.%d-%H%M')
+          short_sha="${GITHUB_SHA::7}"
+          version="v${build_time}-${short_sha}"
+          echo "tag=${version}" >> "${GITHUB_OUTPUT}"
+          echo "build_time=${build_time}" >> "${GITHUB_OUTPUT}"
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -56,38 +65,44 @@ jobs:
       - name: Build deploy zip
         run: |
           python scripts/build_deploy_package.py \
-            --output dist/eSIM-SMS-Forwarder-deploy-${{ github.sha }}.zip \
-            --copy-to dist/eSIM-SMS-Forwarder-deploy-latest.zip
+            --output dist/eSIM-SMS-Forwarder-deploy-${{ steps.version.outputs.tag }}.zip \
+            --copy-to dist/eSIM-SMS-Forwarder-deploy.zip
 
       - name: Upload deploy artifact
         uses: actions/upload-artifact@v4
         with:
-          name: eSIM-SMS-Forwarder-deploy-${{ github.sha }}
+          name: eSIM-SMS-Forwarder-deploy-${{ steps.version.outputs.tag }}
           path: |
-            dist/eSIM-SMS-Forwarder-deploy-${{ github.sha }}.zip
-            dist/eSIM-SMS-Forwarder-deploy-latest.zip
+            dist/eSIM-SMS-Forwarder-deploy-${{ steps.version.outputs.tag }}.zip
+            dist/eSIM-SMS-Forwarder-deploy.zip
           if-no-files-found: error
 
-      - name: Move rolling latest tag
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -fa latest -m "Latest automated build" "${{ github.sha }}"
-          git push origin refs/tags/latest --force
-
-      - name: Publish rolling latest release
+      - name: Publish release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
-          name: Latest build
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: 自动构建 ${{ steps.version.outputs.tag }}
           body: |
-            Automated deploy package for commit `${{ github.sha }}`.
+            ## 更新内容
 
-            Recommended asset:
-            - `eSIM-SMS-Forwarder-deploy-latest.zip`
+            - 自动构建时间：${{ steps.version.outputs.build_time }}（Asia/Shanghai）
+            - 提交版本：`${{ github.sha }}`
+            - 包含最新前端构建、Web 管理服务、短信转发服务
+            - 包含 Debian 一键安装脚本与环境检查
+            - 对 `aarch64 / arm64` 设备自动安装内置 `lpac`
+
+            ## 安装命令
+
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/cyDione/eSIM-SMS-Forwarder/main/scripts/install_latest.sh | sudo sh
+            ```
+
+            ## 发布资产
+
+            - `eSIM-SMS-Forwarder-deploy.zip`
+            - `eSIM-SMS-Forwarder-deploy-${{ steps.version.outputs.tag }}.zip`
           files: |
-            dist/eSIM-SMS-Forwarder-deploy-${{ github.sha }}.zip
-            dist/eSIM-SMS-Forwarder-deploy-latest.zip
+            dist/eSIM-SMS-Forwarder-deploy-${{ steps.version.outputs.tag }}.zip
+            dist/eSIM-SMS-Forwarder-deploy.zip
           fail_on_unmatched_files: true
