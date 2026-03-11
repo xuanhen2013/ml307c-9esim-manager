@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -61,12 +62,17 @@ def parse_kv(raw: str) -> dict[str, str]:
 def ensure_state() -> dict[str, object]:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     if not STATE_PATH.exists():
-        return {"seen_sms": []}
+        return {"seen_sms": [], "seen_fingerprints": []}
     try:
-        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        if "seen_sms" not in state or not isinstance(state["seen_sms"], list):
+            state["seen_sms"] = []
+        if "seen_fingerprints" not in state or not isinstance(state["seen_fingerprints"], list):
+            state["seen_fingerprints"] = []
+        return state
     except json.JSONDecodeError:
         LOG.warning("state file is corrupted, rebuilding: %s", STATE_PATH)
-        return {"seen_sms": []}
+        return {"seen_sms": [], "seen_fingerprints": []}
 
 
 def save_state(state: dict[str, object]) -> None:
@@ -150,6 +156,18 @@ def fetch_sms_detail(path: str) -> dict[str, str]:
     }
 
 
+def build_sms_fingerprint(detail: dict[str, str]) -> str:
+    raw = "\n".join(
+        [
+            detail.get("number", ""),
+            detail.get("timestamp", ""),
+            detail.get("state", ""),
+            detail.get("text", ""),
+        ]
+    )
+    return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
+
+
 def format_message(detail: dict[str, str]) -> tuple[str, str]:
     number = detail["number"] or "unknown"
     timestamp = format_beijing_timestamp(detail["timestamp"])
@@ -182,6 +200,7 @@ def main() -> int:
 
     state = ensure_state()
     seen_sms = set(state.get("seen_sms", []))
+    seen_fingerprints = set(state.get("seen_fingerprints", []))
     LOG.info("sms forwarder started, modem=%s poll_interval=%s", modem_id, POLL_INTERVAL)
 
     while True:
@@ -192,10 +211,20 @@ def main() -> int:
             changed = False
 
             for sms_path in sms_paths:
-                if sms_path in current_seen:
-                    continue
                 detail = fetch_sms_detail(sms_path)
-                seen_sms.add(sms_path)
+                fingerprint = build_sms_fingerprint(detail)
+
+                # Keep the legacy path-based state for migration, but trust the
+                # fingerprint first because SMS object paths can be reused after
+                # modem restarts or SIM/profile switches.
+                if fingerprint in seen_fingerprints:
+                    continue
+
+                if sms_path not in current_seen:
+                    seen_sms.add(sms_path)
+                    changed = True
+
+                seen_fingerprints.add(fingerprint)
                 changed = True
 
                 if detail["state"] not in forward_states:
@@ -215,6 +244,7 @@ def main() -> int:
 
             if changed:
                 state["seen_sms"] = sorted(seen_sms)
+                state["seen_fingerprints"] = sorted(seen_fingerprints)[-200:]
                 save_state(state)
         except subprocess.CalledProcessError as exc:
             LOG.error("mmcli failed: %s", exc.stderr.strip() if exc.stderr else exc)
