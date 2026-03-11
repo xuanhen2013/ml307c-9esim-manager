@@ -1,23 +1,27 @@
 # eSIM-SMS-Forwarder
 
-eUICC/eSIM management, SMS forwarding, and lightweight web admin for Debian-based cellular devices.
+这是一个面向 Debian 蜂窝设备的部署仓库，提供：
 
-## Included Components
+- eUICC / eSIM profile 管理
+- 短信接收与转发
+- 轻量级 Web 管理页面
+
+## 包含内容
 
 - `deploy/esim/lpac-switch.sh`
-  Wrapper around `lpac` for profile listing and switching.
+  对 `lpac` 的简单封装，用于查看 eSIM profile 列表和执行切卡。
 - `deploy/sms_bark/sms_forwarder.py`
-  Polls ModemManager for received SMS and forwards messages to Bark.
+  轮询 ModemManager 中收到的短信，并转发到 Bark。
 - `deploy/sms_bark/sms-bark-forwarder.service`
-  `systemd` unit for the SMS forwarding service.
+  短信转发服务对应的 `systemd` 单元文件。
 - `deploy/sms_bark/sms-bark-forwarder.conf.example`
-  Example Bark configuration.
+  Bark 推送配置示例。
 - `deploy/web_admin/4g_wifi_admin.py`
-  Lightweight web admin for eSIM switching, Bark config, APN editing, modem recovery, and SMS viewing.
+  轻量级 Web 管理页面，支持切卡、Bark 配置、APN 修改、基带恢复和短信查看。
 - `deploy/web_admin/4g-wifi-admin.service`
-  `systemd` unit for the web admin service.
+  Web 管理页面对应的 `systemd` 单元文件。
 
-## Layout
+## 目录结构
 
 ```text
 deploy/
@@ -26,7 +30,7 @@ deploy/
   web_admin/
 ```
 
-## Notes
+## 说明
 
-- These files are the deployment assets currently used on the Debian device.
-- Python bytecode caches are intentionally excluded from the repository.
+- 这里保存的是当前在 Debian 设备上实际使用的部署文件。
+- 仓库中默认排除了 Python 字节码缓存文件。
