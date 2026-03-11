@@ -1,8 +1,26 @@
 # eSIM SMS Forwarder
 
+[![Build Deploy Package](https://github.com/cyDione/eSIM-SMS-Forwarder/actions/workflows/build-deploy-package.yml/badge.svg)](https://github.com/cyDione/eSIM-SMS-Forwarder/actions/workflows/build-deploy-package.yml)
+[![Latest Release](https://img.shields.io/github/v/release/cyDione/eSIM-SMS-Forwarder?display_name=tag)](https://github.com/cyDione/eSIM-SMS-Forwarder/releases/latest)
+
 一个运行在 Debian 设备上的轻量服务，提供 eSIM Profile 管理、短信接收与 Bark 转发，以及可直接在浏览器中操作的管理页面。
 
 项目目标不是做“全家桶路由系统”，而是把 eUICC 切卡、基带控制、短信查看和短信转发这几件事稳定地串起来，方便在随身 WiFi、OpenStick 一类设备上长期运行。
+
+## Debian 一键安装
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cyDione/eSIM-SMS-Forwarder/main/scripts/install_latest.sh | sudo sh
+```
+
+安装脚本会自动：
+
+- 检查系统环境、架构、systemd 和基础依赖
+- 下载最新 Release 安装包
+- 自动安装 Debian 常用依赖
+- 在 `aarch64 / arm64` 设备上自动安装内置 `lpac`
+- 启用并启动 Web 管理与短信转发服务
+- 安装结束后输出访问地址、服务状态和 Bark 配置摘要
 
 ## 功能描述
 

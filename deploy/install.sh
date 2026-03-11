@@ -130,6 +130,56 @@ show_dependency_warnings() {
     fi
 }
 
+service_status() {
+    service_name=$1
+    if systemctl is-active "${service_name}" >/dev/null 2>&1; then
+        printf '%s' "active"
+    else
+        systemctl is-active "${service_name}" 2>/dev/null || printf '%s' "unknown"
+    fi
+}
+
+detect_access_url() {
+    if command -v hostname >/dev/null 2>&1; then
+        first_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+        if [ -n "${first_ip}" ]; then
+            printf '%s' "http://${first_ip}:8080/"
+            return
+        fi
+    fi
+    printf '%s' "http://<device-ip>:8080/"
+}
+
+print_install_summary() {
+    admin_state=$(service_status 4g-wifi-admin.service)
+    sms_state=$(service_status sms-bark-forwarder.service)
+    access_url=$(detect_access_url)
+
+    if [ -x "${LPAC_HOME_DST}/bin/lpac" ]; then
+        lpac_state="已安装"
+    else
+        lpac_state="未安装"
+    fi
+
+    if config_ready; then
+        bark_state="已配置"
+    else
+        bark_state="未配置"
+    fi
+
+    printf '\n'
+    printf '%s\n' "========== 安装摘要 =========="
+    printf '%s\n' "管理页面: ${access_url}"
+    printf '%s\n' "4g-wifi-admin.service: ${admin_state}"
+    printf '%s\n' "sms-bark-forwarder.service: ${sms_state}"
+    printf '%s\n' "lpac: ${lpac_state}"
+    printf '%s\n' "Bark 配置: ${bark_state}"
+    printf '%s\n' "配置文件: ${SMS_CONFIG_DST}"
+    printf '%s\n' "切卡命令: /usr/local/bin/lpac-switch list"
+    printf '%s\n' "查看短信: mmcli -m any --messaging-list-sms"
+    printf '%s\n' "================================"
+}
+
 install_system_packages() {
     missing_packages=""
 
@@ -278,7 +328,8 @@ main() {
 
     log "部署完成"
     log "项目目录: ${PROJECT_DIR}"
-    log "管理页面: http://<device-ip>:8080/"
+    log "管理页面: $(detect_access_url)"
+    print_install_summary
 }
 
 main "$@"
