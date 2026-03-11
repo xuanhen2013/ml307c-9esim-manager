@@ -37,12 +37,16 @@ download_file() {
     url=$1
     output=$2
     if command -v curl >/dev/null 2>&1; then
-        curl -fL --retry 3 --connect-timeout 15 -o "${output}" "${url}"
-        return 0
+        if curl -fL --retry 2 --connect-timeout 15 --max-time 45 -o "${output}" "${url}"; then
+            return 0
+        fi
+        return 1
     fi
     if command -v wget >/dev/null 2>&1; then
-        wget -O "${output}" "${url}"
-        return 0
+        if wget -O "${output}" "${url}"; then
+            return 0
+        fi
+        return 1
     fi
     die "缺少 curl 或 wget，无法下载安装包"
 }
@@ -77,7 +81,7 @@ main() {
     mkdir -p "${extract_dir}"
 
     release_url="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${RELEASE_TAG}/${ASSET_NAME}"
-    source_url="https://github.com/${REPO_OWNER}/${REPO_NAME}/archive/refs/heads/main.zip"
+    source_url="https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/zip/refs/heads/main"
 
     log "尝试下载最新发布包"
     if download_file "${release_url}" "${archive_path}"; then
