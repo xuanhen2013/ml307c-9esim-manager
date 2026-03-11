@@ -127,7 +127,20 @@ frontend/dist/
 
 ### 3. 一键部署
 
-如果仓库里已经包含构建好的 `deploy/web_admin/frontend_dist`，Debian 设备上可以直接一键部署：
+推荐直接在 Debian 上执行这一条命令：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cyDione/eSIM-SMS-Forwarder/main/scripts/install_latest.sh | sudo sh
+```
+
+这条命令会自动：
+
+- 优先下载 GitHub Release 中最新构建好的部署包
+- 如果最新 Release 暂时不可用，则自动回退到 `main` 分支源码包
+- 自动解压并执行 `deploy/install.sh`
+- 自动安装并启动服务
+
+如果你更想手动下载仓库后再安装，也可以这样做：
 
 ```bash
 git clone <your-repo-url>
@@ -178,6 +191,8 @@ unzip eSIM-SMS-Forwarder-deploy-latest.zip
 cd eSIM-SMS-Forwarder-deploy-latest
 sudo sh ./deploy/install.sh
 ```
+
+如果只是要安装最新版本，仍然推荐直接使用上面的 `curl | sudo sh` 单行命令。
 
 ### 5. 部署后端与短信转发脚本
 

@@ -1,0 +1,108 @@
+#!/bin/sh
+set -eu
+
+REPO_OWNER="${REPO_OWNER:-cyDione}"
+REPO_NAME="${REPO_NAME:-eSIM-SMS-Forwarder}"
+RELEASE_TAG="${RELEASE_TAG:-latest}"
+ASSET_NAME="${ASSET_NAME:-eSIM-SMS-Forwarder-deploy-latest.zip}"
+
+TMP_DIR=""
+
+log() {
+    printf '%s\n' "[bootstrap] $*"
+}
+
+warn() {
+    printf '%s\n' "[bootstrap] $*" >&2
+}
+
+die() {
+    printf '%s\n' "[bootstrap] $*" >&2
+    exit 1
+}
+
+cleanup() {
+    if [ -n "${TMP_DIR}" ] && [ -d "${TMP_DIR}" ]; then
+        rm -rf "${TMP_DIR}"
+    fi
+}
+
+require_root() {
+    if [ "$(id -u)" != "0" ]; then
+        die "请使用 root 运行，例如：curl -fsSL <url> | sudo sh"
+    fi
+}
+
+download_file() {
+    url=$1
+    output=$2
+    if command -v curl >/dev/null 2>&1; then
+        curl -fL --retry 3 --connect-timeout 15 -o "${output}" "${url}"
+        return 0
+    fi
+    if command -v wget >/dev/null 2>&1; then
+        wget -O "${output}" "${url}"
+        return 0
+    fi
+    die "缺少 curl 或 wget，无法下载安装包"
+}
+
+extract_zip() {
+    archive=$1
+    target_dir=$2
+    if command -v unzip >/dev/null 2>&1; then
+        unzip -q "${archive}" -d "${target_dir}"
+        return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$archive" "$target_dir" <<'PY'
+import sys
+from zipfile import ZipFile
+
+archive, target = sys.argv[1], sys.argv[2]
+ZipFile(archive).extractall(target)
+PY
+        return 0
+    fi
+    die "缺少 unzip，且没有 python3，无法解压安装包"
+}
+
+main() {
+    require_root
+    trap cleanup EXIT INT TERM
+
+    TMP_DIR=$(mktemp -d /tmp/esim-sms-forwarder.XXXXXX)
+    archive_path="${TMP_DIR}/${ASSET_NAME}"
+    extract_dir="${TMP_DIR}/package"
+    mkdir -p "${extract_dir}"
+
+    release_url="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${RELEASE_TAG}/${ASSET_NAME}"
+    source_url="https://github.com/${REPO_OWNER}/${REPO_NAME}/archive/refs/heads/main.zip"
+
+    log "尝试下载最新发布包"
+    if download_file "${release_url}" "${archive_path}"; then
+        log "已下载 Release 包"
+    else
+        warn "最新 Release 不可用，回退到 main 分支源码包"
+        download_file "${source_url}" "${archive_path}"
+    fi
+
+    log "解压安装包"
+    extract_zip "${archive_path}" "${extract_dir}"
+
+    if [ -f "${extract_dir}/deploy/install.sh" ]; then
+        package_root="${extract_dir}"
+    else
+        package_root=$(find "${extract_dir}" -mindepth 1 -maxdepth 1 -type d | head -n 1 || true)
+    fi
+
+    [ -n "${package_root}" ] || die "未找到解压后的项目目录"
+    [ -f "${package_root}/deploy/install.sh" ] || die "安装包中缺少 deploy/install.sh"
+
+    log "开始执行部署脚本"
+    cd "${package_root}"
+    sh ./deploy/install.sh
+    log "安装完成"
+}
+
+main "$@"
