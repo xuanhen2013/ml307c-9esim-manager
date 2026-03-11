@@ -99,6 +99,43 @@ show_dependency_warnings() {
     fi
 }
 
+install_system_packages() {
+    missing_packages=""
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        missing_packages="${missing_packages} python3"
+    fi
+    if ! command -v mmcli >/dev/null 2>&1; then
+        missing_packages="${missing_packages} modemmanager"
+    fi
+    if ! command -v nmcli >/dev/null 2>&1; then
+        missing_packages="${missing_packages} network-manager"
+    fi
+    if ! command -v qmicli >/dev/null 2>&1; then
+        missing_packages="${missing_packages} libqmi-utils"
+    fi
+    if ! command -v unzip >/dev/null 2>&1; then
+        missing_packages="${missing_packages} unzip"
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        missing_packages="${missing_packages} curl ca-certificates"
+    fi
+
+    if [ -z "${missing_packages}" ]; then
+        return
+    fi
+
+    if ! command -v apt-get >/dev/null 2>&1; then
+        warn "未检测到 apt-get，无法自动安装依赖:${missing_packages}"
+        return
+    fi
+
+    log "安装系统依赖:${missing_packages}"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y ${missing_packages}
+}
+
 main() {
     require_root
 
@@ -109,6 +146,8 @@ main() {
     require_file "${SMS_CONFIG_EXAMPLE_SRC}"
     require_file "${LPAC_SWITCH_SRC}"
     require_file "${LPAC_WRAPPER_SRC}"
+
+    install_system_packages
 
     mkdir -p /usr/local/bin /etc/systemd/system
 

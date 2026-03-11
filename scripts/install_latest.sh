@@ -71,6 +71,22 @@ PY
     die "缺少 unzip，且没有 python3，无法解压安装包"
 }
 
+ensure_extract_dependencies() {
+    if command -v unzip >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1; then
+        return
+    fi
+
+    if command -v apt-get >/dev/null 2>&1; then
+        log "安装解压所需依赖 python3"
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y python3
+        return
+    fi
+
+    die "缺少 unzip 和 python3，且无法自动安装"
+}
+
 main() {
     require_root
     trap cleanup EXIT INT TERM
@@ -90,6 +106,8 @@ main() {
         warn "最新 Release 不可用，回退到 main 分支源码包"
         download_file "${source_url}" "${archive_path}"
     fi
+
+    ensure_extract_dependencies
 
     log "解压安装包"
     extract_zip "${archive_path}" "${extract_dir}"

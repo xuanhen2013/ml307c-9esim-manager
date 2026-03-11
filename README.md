@@ -138,6 +138,7 @@ curl -fsSL https://raw.githubusercontent.com/cyDione/eSIM-SMS-Forwarder/main/scr
 - 优先下载 GitHub Release 中最新构建好的部署包
 - 如果最新 Release 暂时不可用，则自动回退到 `main` 分支源码包
 - 自动解压并执行 `deploy/install.sh`
+- 自动补齐 Debian 常用依赖：`python3`、`curl`、`unzip`、`modemmanager`、`network-manager`、`libqmi-utils`
 - 自动安装并启动服务
 
 如果你更想手动下载仓库后再安装，也可以这样做：
@@ -165,7 +166,7 @@ sudo sh ./deploy/install.sh
 
 注意：
 
-- 这个脚本不会帮你安装 `ModemManager`、`qmicli`、`nmcli`、`lpac`
+- 这个脚本会自动安装 `ModemManager`、`qmicli`、`nmcli` 对应的 Debian 包
 - 如果 Bark 还是示例配置值，脚本会跳过启动 `sms-bark-forwarder.service`
 - eSIM 切卡依赖 `/opt/lpac/bin/lpac` 已经存在
 
