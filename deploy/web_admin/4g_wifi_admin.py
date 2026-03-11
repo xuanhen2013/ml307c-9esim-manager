@@ -22,6 +22,7 @@ from urllib.request import Request, urlopen
 HOST = os.environ.get("FOURG_WIFI_ADMIN_HOST", "0.0.0.0")
 PORT = int(os.environ.get("FOURG_WIFI_ADMIN_PORT", "8080"))
 BARK_CONFIG_PATH = Path("/etc/sms-bark-forwarder.conf")
+APP_CONFIG_PATH = Path("/etc/esim-sms-forwarder.conf")
 STATIC_DIR = Path(
     os.environ.get("FOURG_WIFI_ADMIN_STATIC_DIR", str(Path(__file__).resolve().with_name("frontend_dist")))
 )
@@ -205,6 +206,27 @@ def read_env_config(path: Path) -> dict[str, str]:
 def write_env_config(path: Path, config: dict[str, str]) -> None:
     lines = [f"{key}={value}" for key, value in config.items()]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def app_runtime_config() -> dict[str, str]:
+    config = read_env_config(APP_CONFIG_PATH)
+    if "SIM_TYPE" not in config and os.environ.get("SIM_TYPE"):
+        config["SIM_TYPE"] = os.environ["SIM_TYPE"]
+    if "ESIM_MANAGEMENT_ENABLED" not in config and os.environ.get("ESIM_MANAGEMENT_ENABLED"):
+        config["ESIM_MANAGEMENT_ENABLED"] = os.environ["ESIM_MANAGEMENT_ENABLED"]
+    return config
+
+
+def esim_management_enabled() -> bool:
+    config = app_runtime_config()
+    raw = str(config.get("ESIM_MANAGEMENT_ENABLED", "")).strip().lower()
+    if raw:
+        return raw in {"1", "true", "yes", "enabled"}
+    return str(config.get("SIM_TYPE", "esim")).strip().lower() != "physical"
+
+
+def sim_type() -> str:
+    return str(app_runtime_config().get("SIM_TYPE", "esim")).strip().lower() or "esim"
 
 
 def profile_is_active(profile: dict[str, Any]) -> bool:
@@ -419,22 +441,27 @@ def get_status(refresh_profiles: bool = False) -> dict[str, Any]:
     status_message = ""
     errors: list[str] = []
     bark = read_env_config(BARK_CONFIG_PATH)
+    esim_enabled = esim_management_enabled()
+    current_sim_type = sim_type()
     connection = get_connection_info()
     connection_defaults = infer_apn_defaults_from_connection(
         "" if connection.get("gsm.apn", "") == "--" else connection.get("gsm.apn", ""),
         "" if connection.get("gsm.username", "") == "--" else connection.get("gsm.username", ""),
     )
 
-    try:
-        profiles = refresh_profile_cache(force=True) if refresh_profiles else get_cached_profiles()[0]
-        if not profiles and not refresh_profiles:
-            cached_profiles, cache_error = get_cached_profiles()
-            profiles = cached_profiles
-            if cache_error:
-                errors.append(f"读取 eSIM 列表失败：{cache_error}")
-    except Exception as exc:
+    if esim_enabled:
+        try:
+            profiles = refresh_profile_cache(force=True) if refresh_profiles else get_cached_profiles()[0]
+            if not profiles and not refresh_profiles:
+                cached_profiles, cache_error = get_cached_profiles()
+                profiles = cached_profiles
+                if cache_error:
+                    errors.append(f"读取 eSIM 列表失败：{cache_error}")
+        except Exception as exc:
+            profiles = []
+            errors.append(f"读取 eSIM 列表失败：{exc}")
+    else:
         profiles = []
-        errors.append(f"读取 eSIM 列表失败：{exc}")
 
     modem, modem_error = get_modem_info()
     if modem_error:
@@ -449,6 +476,11 @@ def get_status(refresh_profiles: bool = False) -> dict[str, Any]:
 
     return {
         "profiles": profiles,
+        "capabilities": {
+            "sim_type": current_sim_type,
+            "esim_management_enabled": esim_enabled,
+            "lpac_installed": os.path.exists("/opt/lpac/bin/lpac"),
+        },
         "modem_available": not modem_error,
         "status_message": status_message,
         "errors": errors,
@@ -666,6 +698,9 @@ def apply_apn_settings(ctx: ActionContext, payload: dict[str, Any]) -> None:
 
 
 def switch_profile(ctx: ActionContext, payload: dict[str, Any]) -> None:
+    if not esim_management_enabled():
+        raise RuntimeError("当前为普通 SIM 模式，eSIM 管理功能已禁用")
+
     iccid = str(payload.get("iccid", "")).strip()
     if not iccid:
         raise ValueError("缺少 ICCID")
@@ -1043,11 +1078,14 @@ class AppHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    try:
-        refresh_profile_cache(force=True)
-        print("eSIM profile cache initialized")
-    except Exception as exc:
-        print(f"eSIM profile cache init failed: {exc}")
+    if esim_management_enabled():
+        try:
+            refresh_profile_cache(force=True)
+            print("eSIM profile cache initialized")
+        except Exception as exc:
+            print(f"eSIM profile cache init failed: {exc}")
+    else:
+        print("eSIM management disabled for physical SIM mode")
     server = ThreadingHTTPServer((HOST, PORT), AppHandler)
     print(f"4G WiFi admin listening on http://{HOST}:{PORT}")
     server.serve_forever()

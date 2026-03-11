@@ -22,7 +22,9 @@ FRONTEND_DIST_DST="/usr/local/bin/frontend_dist"
 WEB_ADMIN_SERVICE_DST="/etc/systemd/system/4g-wifi-admin.service"
 SMS_SERVICE_DST="/etc/systemd/system/sms-bark-forwarder.service"
 SMS_CONFIG_DST="/etc/sms-bark-forwarder.conf"
+APP_CONFIG_DST="/etc/esim-sms-forwarder.conf"
 LPAC_HOME_DST="/opt/lpac"
+SIM_TYPE="esim"
 
 log() {
     printf '%s\n' "[install] $*"
@@ -35,6 +37,17 @@ warn() {
 die() {
     printf '%s\n' "[error] $*" >&2
     exit 1
+}
+
+usage() {
+    cat <<'EOF'
+Usage:
+  sh ./deploy/install.sh [--sim-type esim|physical]
+
+Options:
+  --sim-type esim      默认模式，启用 eSIM 管理与短信转发
+  --sim-type physical  普通 SIM 模式，禁用 eSIM 管理，只启用短信相关功能
+EOF
 }
 
 require_root() {
@@ -52,6 +65,37 @@ install_file() {
     dst=$2
     mode=$3
     install -m "$mode" "$src" "$dst"
+}
+
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --sim-type)
+                [ $# -ge 2 ] || die "--sim-type 缺少参数"
+                SIM_TYPE=$2
+                shift 2
+                ;;
+            --sim-type=*)
+                SIM_TYPE=${1#*=}
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                die "不支持的参数: $1"
+                ;;
+        esac
+    done
+
+    case "${SIM_TYPE}" in
+        esim|physical)
+            ;;
+        *)
+            die "--sim-type 只支持 esim 或 physical"
+            ;;
+    esac
 }
 
 copy_frontend_dist() {
@@ -88,6 +132,8 @@ check_environment() {
             warn "当前系统不是 Debian/Ubuntu，自动安装依赖步骤可能不适配"
             ;;
     esac
+
+    log "安装模式: ${SIM_TYPE}"
 }
 
 ensure_config() {
@@ -125,9 +171,28 @@ show_dependency_warnings() {
         fi
     done
 
+    if [ "${SIM_TYPE}" = "physical" ]; then
+        return
+    fi
+
     if [ ! -x /opt/lpac/bin/lpac ]; then
         warn "未检测到 /opt/lpac/bin/lpac，eSIM 切卡功能暂时不可用"
     fi
+}
+
+write_app_config() {
+    esim_enabled=1
+    if [ "${SIM_TYPE}" = "physical" ]; then
+        esim_enabled=0
+    fi
+
+    cat > "${APP_CONFIG_DST}" <<EOF
+SIM_TYPE=${SIM_TYPE}
+ESIM_MANAGEMENT_ENABLED=${esim_enabled}
+EOF
+
+    chmod 644 "${APP_CONFIG_DST}"
+    log "已写入安装模式配置: ${APP_CONFIG_DST}"
 }
 
 service_status() {
@@ -172,10 +237,15 @@ print_install_summary() {
     printf '%s\n' "管理页面: ${access_url}"
     printf '%s\n' "4g-wifi-admin.service: ${admin_state}"
     printf '%s\n' "sms-bark-forwarder.service: ${sms_state}"
+    printf '%s\n' "安装模式: ${SIM_TYPE}"
     printf '%s\n' "lpac: ${lpac_state}"
     printf '%s\n' "Bark 配置: ${bark_state}"
     printf '%s\n' "配置文件: ${SMS_CONFIG_DST}"
-    printf '%s\n' "切卡命令: /usr/local/bin/lpac-switch list"
+    if [ "${SIM_TYPE}" = "esim" ]; then
+        printf '%s\n' "切卡命令: /usr/local/bin/lpac-switch list"
+    else
+        printf '%s\n' "切卡命令: 当前为普通 SIM 模式，已禁用"
+    fi
     printf '%s\n' "查看短信: mmcli -m any --messaging-list-sms"
     printf '%s\n' "================================"
 }
@@ -237,6 +307,11 @@ PY
 }
 
 install_lpac() {
+    if [ "${SIM_TYPE}" = "physical" ]; then
+        log "普通 SIM 模式已启用，跳过 lpac 安装"
+        return
+    fi
+
     ARCH=$(uname -m 2>/dev/null || echo unknown)
 
     if [ -x "${LPAC_HOME_DST}/bin/lpac" ]; then
@@ -276,6 +351,7 @@ install_lpac() {
 }
 
 main() {
+    parse_args "$@"
     require_root
 
     require_file "${WEB_ADMIN_SRC}"
@@ -295,8 +371,12 @@ main() {
     log "安装管理服务脚本"
     install_file "${WEB_ADMIN_SRC}" "${WEB_ADMIN_DST}" 755
     install_file "${SMS_FORWARDER_SRC}" "${SMS_FORWARDER_DST}" 755
-    install_file "${LPAC_SWITCH_SRC}" "${LPAC_SWITCH_DST}" 755
-    install_file "${LPAC_WRAPPER_SRC}" "${LPAC_WRAPPER_DST}" 755
+    if [ "${SIM_TYPE}" = "esim" ]; then
+        install_file "${LPAC_SWITCH_SRC}" "${LPAC_SWITCH_DST}" 755
+        install_file "${LPAC_WRAPPER_SRC}" "${LPAC_WRAPPER_DST}" 755
+    else
+        rm -f "${LPAC_SWITCH_DST}" "${LPAC_WRAPPER_DST}"
+    fi
 
     log "同步前端静态资源"
     copy_frontend_dist
@@ -305,6 +385,7 @@ main() {
     install_file "${WEB_ADMIN_SERVICE_SRC}" "${WEB_ADMIN_SERVICE_DST}" 644
     install_file "${SMS_SERVICE_SRC}" "${SMS_SERVICE_DST}" 644
 
+    write_app_config
     ensure_config
     show_dependency_warnings
 

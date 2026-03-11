@@ -72,6 +72,11 @@ type SmsItem = {
 
 type StatusData = {
   profiles: Profile[]
+  capabilities: {
+    sim_type: string
+    esim_management_enabled: boolean
+    lpac_installed: boolean
+  }
   modem_available: boolean
   status_message: string
   errors: string[]
@@ -411,6 +416,10 @@ function App() {
       toast.info("当前已有任务在执行，请稍等")
       return
     }
+    if (action === "switch_profile" && !(status?.capabilities.esim_management_enabled ?? true)) {
+      toast.info("当前为普通 SIM 模式，eSIM 管理功能已禁用")
+      return
+    }
     setSubmittingActionLabel(label)
     appendLog({
       time: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
@@ -448,7 +457,7 @@ function App() {
       })
       toast.error(message)
     }
-  }, [activeAction, appendLog, pollAction, submittingActionLabel])
+  }, [activeAction, appendLog, pollAction, status?.capabilities.esim_management_enabled, submittingActionLabel])
 
   useEffect(() => {
     void refreshStatus(true)
@@ -485,6 +494,12 @@ function App() {
   }, [])
 
   const activeProfile = getActiveProfile(status?.profiles ?? [])
+  const esimEnabled = status?.capabilities.esim_management_enabled ?? true
+  const activeProfileLabel = esimEnabled ? activeProfile?.display_name || "未检测到" : "普通 SIM"
+  const activeProfileHint = esimEnabled
+    ? `手机号：${status?.modem.number || "--"}`
+    : `手机号：${status?.modem.number || "--"}`
+  const profileCountLabel = esimEnabled ? `${status?.profiles.length ?? 0} 个` : "已禁用"
   const actionBusy = Boolean(activeAction || submittingActionLabel)
   const shellActionLabel = activeAction?.label || submittingActionLabel
 
@@ -562,9 +577,9 @@ function App() {
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
               <OverviewTile
                 icon={CardSimIcon}
-                label="当前 Profile"
-                value={activeProfile?.display_name || "未检测到"}
-                hint={`手机号：${status?.modem.number || "--"}`}
+                label={esimEnabled ? "当前 Profile" : "当前 SIM"}
+                value={activeProfileLabel}
+                hint={activeProfileHint}
               />
               <OverviewTile
                 icon={RadioTowerIcon}
@@ -611,10 +626,14 @@ function App() {
                     <CardSimIcon />
                     eSIM Profiles
                   </CardTitle>
-                  <CardDescription>自动跟随状态刷新，新增或变更 Profile 后会自动显示。</CardDescription>
+                  <CardDescription>
+                    {esimEnabled
+                      ? "手动刷新状态后同步最新 Profile 列表。"
+                      : "当前为普通 SIM 模式，eSIM 管理功能已禁用。"}
+                  </CardDescription>
                 </div>
                 <CardAction>
-                  <Badge variant="outline">{status?.profiles.length ?? 0} 个</Badge>
+                  <Badge variant="outline">{profileCountLabel}</Badge>
                 </CardAction>
               </div>
             </CardHeader>
@@ -627,6 +646,12 @@ function App() {
                       title="正在读取设备状态"
                       description="首次加载会顺带读取 eSIM、短信和基带信息。"
                       spinning
+                    />
+                  ) : !esimEnabled ? (
+                    <EmptyState
+                      icon={CardSimIcon}
+                      title="普通 SIM 模式"
+                      description="此模式只保留短信转发、基带状态和网络设置，eSIM Profiles 与切卡功能已禁用。"
                     />
                   ) : status?.profiles.length ? (
                     status.profiles.map((profile) => {

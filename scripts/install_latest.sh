@@ -6,6 +6,7 @@ REPO_NAME="${REPO_NAME:-eSIM-SMS-Forwarder}"
 ASSET_NAME="${ASSET_NAME:-eSIM-SMS-Forwarder-deploy.zip}"
 
 TMP_DIR=""
+INSTALL_ARGS=""
 
 log() {
     printf '%s\n' "[bootstrap] $*"
@@ -18,6 +19,17 @@ warn() {
 die() {
     printf '%s\n' "[bootstrap] $*" >&2
     exit 1
+}
+
+usage() {
+    cat <<'EOF'
+Usage:
+  curl -fsSL <url> | sudo sh -s -- [--sim-type esim|physical]
+
+Options:
+  --sim-type esim      默认模式，启用 eSIM 管理与短信转发
+  --sim-type physical  普通 SIM 模式，禁用 eSIM 管理，只启用短信相关功能
+EOF
 }
 
 cleanup() {
@@ -86,7 +98,31 @@ ensure_extract_dependencies() {
     die "缺少 unzip 和 python3，且无法自动安装"
 }
 
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --sim-type)
+                [ $# -ge 2 ] || die "--sim-type 缺少参数"
+                INSTALL_ARGS="${INSTALL_ARGS} --sim-type $2"
+                shift 2
+                ;;
+            --sim-type=*)
+                INSTALL_ARGS="${INSTALL_ARGS} $1"
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                die "不支持的参数: $1"
+                ;;
+        esac
+    done
+}
+
 main() {
+    parse_args "$@"
     require_root
     trap cleanup EXIT INT TERM
 
@@ -122,7 +158,8 @@ main() {
 
     log "开始执行部署脚本"
     cd "${package_root}"
-    sh ./deploy/install.sh
+    # shellcheck disable=SC2086
+    sh ./deploy/install.sh ${INSTALL_ARGS}
     log "安装完成"
 }
 

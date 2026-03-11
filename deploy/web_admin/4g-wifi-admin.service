@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/esim-sms-forwarder.conf
 ExecStart=/usr/bin/python3 /usr/local/bin/4g_wifi_admin.py
 Restart=always
 RestartSec=5
