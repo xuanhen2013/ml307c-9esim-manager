@@ -1,4 +1,4 @@
-# Copy to /etc/sms-bark-forwarder.conf and configure Apprise targets below.
+# Copy to /etc/sms-forwarder.conf and configure Apprise targets below.
 MODEM_ID=any
 
 # Apprise target list, JSON array format.

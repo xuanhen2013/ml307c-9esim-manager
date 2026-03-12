@@ -7,9 +7,9 @@ PROJECT_DIR=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
 WEB_ADMIN_SRC="${SCRIPT_DIR}/web_admin/4g_wifi_admin.py"
 WEB_ADMIN_SERVICE_SRC="${SCRIPT_DIR}/web_admin/4g-wifi-admin.service"
 FRONTEND_DIST_SRC="${SCRIPT_DIR}/web_admin/frontend_dist"
-SMS_FORWARDER_SRC="${SCRIPT_DIR}/sms_bark/sms_forwarder.py"
-SMS_SERVICE_SRC="${SCRIPT_DIR}/sms_bark/sms-bark-forwarder.service"
-SMS_CONFIG_EXAMPLE_SRC="${SCRIPT_DIR}/sms_bark/sms-bark-forwarder.conf.example"
+SMS_FORWARDER_SRC="${SCRIPT_DIR}/sms_forwarder/sms_forwarder.py"
+SMS_SERVICE_SRC="${SCRIPT_DIR}/sms_forwarder/sms-forwarder.service"
+SMS_CONFIG_EXAMPLE_SRC="${SCRIPT_DIR}/sms_forwarder/sms-forwarder.conf.example"
 NOTIFICATION_UTILS_SRC="${SCRIPT_DIR}/shared/notification_utils.py"
 LPAC_SWITCH_SRC="${SCRIPT_DIR}/esim/lpac-switch.sh"
 LPAC_WRAPPER_SRC="${SCRIPT_DIR}/esim/lpac"
@@ -22,8 +22,10 @@ LPAC_SWITCH_DST="/usr/local/bin/lpac-switch"
 LPAC_WRAPPER_DST="/usr/local/bin/lpac"
 FRONTEND_DIST_DST="/usr/local/bin/frontend_dist"
 WEB_ADMIN_SERVICE_DST="/etc/systemd/system/4g-wifi-admin.service"
-SMS_SERVICE_DST="/etc/systemd/system/sms-bark-forwarder.service"
-SMS_CONFIG_DST="/etc/sms-bark-forwarder.conf"
+SMS_SERVICE_DST="/etc/systemd/system/sms-forwarder.service"
+SMS_CONFIG_DST="/etc/sms-forwarder.conf"
+LEGACY_SMS_SERVICE_DST="/etc/systemd/system/sms-bark-forwarder.service"
+LEGACY_SMS_CONFIG_DST="/etc/sms-bark-forwarder.conf"
 APP_CONFIG_DST="/etc/esim-sms-forwarder.conf"
 LPAC_HOME_DST="/opt/lpac"
 RUNTIME_HOME_DST="/opt/esim-sms-forwarder"
@@ -212,6 +214,11 @@ check_environment() {
 }
 
 ensure_config() {
+    if [ ! -f "${SMS_CONFIG_DST}" ] && [ -f "${LEGACY_SMS_CONFIG_DST}" ]; then
+        cp -f "${LEGACY_SMS_CONFIG_DST}" "${SMS_CONFIG_DST}"
+        chmod 600 "${SMS_CONFIG_DST}"
+        log "已迁移旧通知配置到: ${SMS_CONFIG_DST}"
+    fi
     if [ -f "${SMS_CONFIG_DST}" ]; then
         log "保留现有通知配置: ${SMS_CONFIG_DST}"
         return
@@ -306,6 +313,14 @@ service_status() {
     fi
 }
 
+migrate_legacy_sms_service() {
+    if systemctl list-unit-files 2>/dev/null | grep -q '^sms-bark-forwarder\.service'; then
+        systemctl disable sms-bark-forwarder.service >/dev/null 2>&1 || true
+        systemctl stop sms-bark-forwarder.service >/dev/null 2>&1 || true
+    fi
+    rm -f "${LEGACY_SMS_SERVICE_DST}"
+}
+
 detect_access_url() {
     if command -v hostname >/dev/null 2>&1; then
         first_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
@@ -319,7 +334,7 @@ detect_access_url() {
 
 print_install_summary() {
     admin_state=$(service_status 4g-wifi-admin.service)
-    sms_state=$(service_status sms-bark-forwarder.service)
+    sms_state=$(service_status sms-forwarder.service)
     access_url=$(detect_access_url)
 
     if lpac_binary_usable; then
@@ -338,7 +353,7 @@ print_install_summary() {
     printf '%s\n' "========== 安装摘要 =========="
     printf '%s\n' "管理页面: ${access_url}"
     printf '%s\n' "4g-wifi-admin.service: ${admin_state}"
-    printf '%s\n' "sms-bark-forwarder.service: ${sms_state}"
+    printf '%s\n' "sms-forwarder.service: ${sms_state}"
     printf '%s\n' "安装模式: ${SIM_TYPE}"
     printf '%s\n' "lpac: ${lpac_state}"
     printf '%s\n' "通知渠道: ${notification_state}"
@@ -687,17 +702,18 @@ main() {
 
     log "启用服务"
     systemctl enable 4g-wifi-admin.service >/dev/null
-    systemctl enable sms-bark-forwarder.service >/dev/null
+    migrate_legacy_sms_service
+    systemctl enable sms-forwarder.service >/dev/null
 
     log "重启管理服务"
     systemctl restart 4g-wifi-admin.service
 
     if config_ready; then
         log "通知渠道配置已就绪，重启短信转发服务"
-        systemctl restart sms-bark-forwarder.service
+        systemctl restart sms-forwarder.service
     else
-        warn "通知渠道尚未配置，已跳过启动 sms-bark-forwarder.service"
-        warn "完成配置后可执行: systemctl restart sms-bark-forwarder.service"
+        warn "通知渠道尚未配置，已跳过启动 sms-forwarder.service"
+        warn "完成配置后可执行: systemctl restart sms-forwarder.service"
     fi
 
     log "部署完成"

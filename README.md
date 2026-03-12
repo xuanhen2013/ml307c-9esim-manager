@@ -145,7 +145,7 @@ sudo sh ./deploy/install.sh --sim-type physical
 实际配置文件路径：
 
 ```text
-/etc/sms-bark-forwarder.conf
+/etc/sms-forwarder.conf
 ```
 
 至少需要填写：
@@ -162,12 +162,12 @@ FORWARD_SMS_STATES=received
 
 ```bash
 systemctl status 4g-wifi-admin.service
-systemctl status sms-bark-forwarder.service
+systemctl status sms-forwarder.service
 ```
 
 ```bash
 journalctl -u 4g-wifi-admin.service -f
-journalctl -u sms-bark-forwarder.service -f
+journalctl -u sms-forwarder.service -f
 ```
 
 ### Web 页面
@@ -210,7 +210,7 @@ npm run build
 
 ```bash
 python -m py_compile deploy/web_admin/4g_wifi_admin.py
-python -m py_compile deploy/sms_bark/sms_forwarder.py
+python -m py_compile deploy/sms_forwarder/sms_forwarder.py
 ```
 
 ## 目录结构
@@ -220,10 +220,10 @@ deploy/
   esim/
     lpac-switch.sh
     lpac
-  sms_bark/
+  sms_forwarder/
     sms_forwarder.py
-    sms-bark-forwarder.service
-    sms-bark-forwarder.conf.example
+    sms-forwarder.service
+    sms-forwarder.conf.example
   web_admin/
     4g_wifi_admin.py
     4g-wifi-admin.service

@@ -26,20 +26,33 @@ from notification_utils import (  # noqa: E402
 )
 
 
-CONFIG_PATH = Path(os.environ.get("SMS_BARK_CONFIG", "/etc/sms-bark-forwarder.conf"))
-STATE_PATH = Path(os.environ.get("SMS_BARK_STATE", "/var/lib/sms-bark-forwarder/state.json"))
-POLL_INTERVAL = int(os.environ.get("SMS_BARK_POLL_INTERVAL", "15"))
-LOG_LEVEL = os.environ.get("SMS_BARK_LOG_LEVEL", "INFO").upper()
+def env_first(*names: str, default: str) -> str:
+    for name in names:
+        value = os.environ.get(name)
+        if value is not None and value != "":
+            return value
+    return default
+
+
+CONFIG_PATH = Path(env_first("SMS_FORWARDER_CONFIG", "SMS_BARK_CONFIG", default="/etc/sms-forwarder.conf"))
+LEGACY_CONFIG_PATH = Path("/etc/sms-bark-forwarder.conf")
+STATE_PATH = Path(
+    env_first("SMS_FORWARDER_STATE", "SMS_BARK_STATE", default="/var/lib/sms-forwarder/state.json")
+)
+POLL_INTERVAL = int(env_first("SMS_FORWARDER_POLL_INTERVAL", "SMS_BARK_POLL_INTERVAL", default="15"))
+LOG_LEVEL = env_first("SMS_FORWARDER_LOG_LEVEL", "SMS_BARK_LOG_LEVEL", default="INFO").upper()
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s %(levelname)s %(message)s",
 )
-LOG = logging.getLogger("sms-bark-forwarder")
+LOG = logging.getLogger("sms-forwarder")
 
 
 def load_env_file(path: Path) -> dict[str, str]:
     data: dict[str, str] = {}
+    if not path.exists() and path == CONFIG_PATH and LEGACY_CONFIG_PATH.exists():
+        path = LEGACY_CONFIG_PATH
     if not path.exists():
         raise FileNotFoundError(f"config file not found: {path}")
     for raw_line in path.read_text(encoding="utf-8").splitlines():
