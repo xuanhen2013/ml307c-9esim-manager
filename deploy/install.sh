@@ -24,8 +24,6 @@ FRONTEND_DIST_DST="/usr/local/bin/frontend_dist"
 WEB_ADMIN_SERVICE_DST="/etc/systemd/system/4g-wifi-admin.service"
 SMS_SERVICE_DST="/etc/systemd/system/sms-forwarder.service"
 SMS_CONFIG_DST="/etc/sms-forwarder.conf"
-LEGACY_SMS_SERVICE_DST="/etc/systemd/system/sms-bark-forwarder.service"
-LEGACY_SMS_CONFIG_DST="/etc/sms-bark-forwarder.conf"
 APP_CONFIG_DST="/etc/esim-sms-forwarder.conf"
 LPAC_HOME_DST="/opt/lpac"
 RUNTIME_HOME_DST="/opt/esim-sms-forwarder"
@@ -214,11 +212,6 @@ check_environment() {
 }
 
 ensure_config() {
-    if [ ! -f "${SMS_CONFIG_DST}" ] && [ -f "${LEGACY_SMS_CONFIG_DST}" ]; then
-        cp -f "${LEGACY_SMS_CONFIG_DST}" "${SMS_CONFIG_DST}"
-        chmod 600 "${SMS_CONFIG_DST}"
-        log "已迁移旧通知配置到: ${SMS_CONFIG_DST}"
-    fi
     if [ -f "${SMS_CONFIG_DST}" ]; then
         log "保留现有通知配置: ${SMS_CONFIG_DST}"
         return
@@ -313,13 +306,7 @@ service_status() {
     fi
 }
 
-migrate_legacy_sms_service() {
-    if systemctl list-unit-files 2>/dev/null | grep -q '^sms-bark-forwarder\.service'; then
-        systemctl disable sms-bark-forwarder.service >/dev/null 2>&1 || true
-        systemctl stop sms-bark-forwarder.service >/dev/null 2>&1 || true
-    fi
-    rm -f "${LEGACY_SMS_SERVICE_DST}"
-}
+
 
 detect_access_url() {
     if command -v hostname >/dev/null 2>&1; then

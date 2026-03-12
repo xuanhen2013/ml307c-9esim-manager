@@ -40,9 +40,7 @@ from notification_utils import (  # noqa: E402
 HOST = os.environ.get("FOURG_WIFI_ADMIN_HOST", "0.0.0.0")
 PORT = int(os.environ.get("FOURG_WIFI_ADMIN_PORT", "8080"))
 NOTIFICATION_CONFIG_PATH = Path("/etc/sms-forwarder.conf")
-LEGACY_NOTIFICATION_CONFIG_PATH = Path("/etc/sms-bark-forwarder.conf")
 SMS_FORWARDER_SERVICE = "sms-forwarder.service"
-LEGACY_SMS_FORWARDER_SERVICE = "sms-bark-forwarder.service"
 APP_CONFIG_PATH = Path("/etc/esim-sms-forwarder.conf")
 STATIC_DIR = Path(
     os.environ.get("FOURG_WIFI_ADMIN_STATIC_DIR", str(Path(__file__).resolve().with_name("frontend_dist")))
@@ -227,22 +225,6 @@ def read_env_config(path: Path) -> dict[str, str]:
 def write_env_config(path: Path, config: dict[str, str]) -> None:
     lines = [f"{key}={value}" for key, value in config.items()]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def notification_config_path() -> Path:
-    if NOTIFICATION_CONFIG_PATH.exists() or not LEGACY_NOTIFICATION_CONFIG_PATH.exists():
-        return NOTIFICATION_CONFIG_PATH
-    return LEGACY_NOTIFICATION_CONFIG_PATH
-
-
-def sms_forwarder_service_name() -> str:
-    active_new = service_state(SMS_FORWARDER_SERVICE)
-    if active_new == "active":
-        return SMS_FORWARDER_SERVICE
-    active_legacy = service_state(LEGACY_SMS_FORWARDER_SERVICE)
-    if active_legacy == "active":
-        return LEGACY_SMS_FORWARDER_SERVICE
-    return SMS_FORWARDER_SERVICE
 
 
 def app_runtime_config() -> dict[str, str]:
@@ -453,7 +435,7 @@ def infer_apn_defaults_from_connection(apn: str, username: str = "") -> Optional
 def get_status(refresh_profiles: bool = False) -> dict[str, Any]:
     status_message = ""
     errors: list[str] = []
-    notification_config = read_env_config(notification_config_path())
+    notification_config = read_env_config(NOTIFICATION_CONFIG_PATH)
     notification_targets = load_notification_targets(notification_config)
     configured_targets = configured_notification_targets(notification_targets)
     esim_enabled = esim_management_enabled()
@@ -524,7 +506,7 @@ def get_status(refresh_profiles: bool = False) -> dict[str, Any]:
         },
         "services": {
             "modemmanager": service_state("ModemManager"),
-            "sms_forwarder": service_state(sms_forwarder_service_name()),
+            "sms_forwarder": service_state(SMS_FORWARDER_SERVICE),
             "web_admin": service_state("4g-wifi-admin.service"),
         },
         "notifications": {
@@ -645,7 +627,7 @@ def recover_modem(ctx: ActionContext) -> None:
         ctx.sleep(10, "等待基带重新枚举")
         run_logged_command(
             ctx,
-            ["systemctl", "restart", sms_forwarder_service_name()],
+            ["systemctl", "restart", SMS_FORWARDER_SERVICE],
             check=False,
             success_message="短信转发服务已尝试重启",
         )
@@ -774,13 +756,13 @@ def save_notifications_config(ctx: ActionContext, payload: dict[str, Any]) -> No
     if not configured_channel_labels(sanitized_targets):
         raise ValueError("请至少启用一个通知渠道")
 
-    config = ensure_notification_config(read_env_config(notification_config_path()))
+    config = ensure_notification_config(read_env_config(NOTIFICATION_CONFIG_PATH))
     save_notification_targets_in_config(config, sanitized_targets)
     write_env_config(NOTIFICATION_CONFIG_PATH, config)
     ctx.log(f"通知渠道配置已写入：{'、'.join(configured_channel_labels(sanitized_targets))}")
     run_logged_command(
         ctx,
-        ["systemctl", "restart", sms_forwarder_service_name()],
+        ["systemctl", "restart", SMS_FORWARDER_SERVICE],
         check=False,
         success_message="短信转发服务已重启",
     )
@@ -789,7 +771,7 @@ def save_notifications_config(ctx: ActionContext, payload: dict[str, Any]) -> No
 def restart_sms_service(ctx: ActionContext) -> None:
     run_logged_command(
         ctx,
-        ["systemctl", "restart", sms_forwarder_service_name()],
+        ["systemctl", "restart", SMS_FORWARDER_SERVICE],
         success_message="短信转发服务已重启",
     )
 
@@ -802,7 +784,7 @@ def resend_last_sms(ctx: ActionContext) -> None:
     for line in (detail.get("text") or "(empty)").splitlines():
         ctx.log(line)
 
-    config = read_env_config(notification_config_path())
+    config = read_env_config(NOTIFICATION_CONFIG_PATH)
     targets = load_notification_targets(config)
     labels = configured_channel_labels(targets)
     if not labels:
@@ -870,7 +852,7 @@ def execute_action(action: str, payload: dict[str, Any], ctx: ActionContext) -> 
     if action == "save_apn":
         apply_apn_settings(ctx, payload)
         return
-    if action in {"save_notifications", "save_bark"}:
+    if action == "save_notifications":
         save_notifications_config(ctx, payload)
         return
     if action == "recover_modem":
@@ -1068,9 +1050,6 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/apn":
                 self._handle_sync_action("save_apn", data)
-                return
-            if path == "/api/bark":
-                self._handle_sync_action("save_notifications", data)
                 return
             if path == "/api/notifications":
                 self._handle_sync_action("save_notifications", data)
