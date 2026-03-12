@@ -123,6 +123,25 @@ type NotificationTarget = {
   type: string
 }
 
+type ChannelKind = "bark" | "telegram" | "gotify" | "ntfy" | "discord" | "custom"
+
+type NotificationChannelField = {
+  key: string
+  label: string
+  placeholder: string
+  required?: boolean
+  inputType?: "text" | "password" | "url"
+  options?: Array<{ label: string; value: string }>
+}
+
+type NotificationChannelDefinition = {
+  type: ChannelKind
+  label: string
+  description: string
+  fields: NotificationChannelField[]
+  createValues: () => Record<string, string>
+}
+
 type ActionLevel = "info" | "warning" | "error" | "command"
 
 type ActionEvent = {
@@ -163,7 +182,12 @@ type PersistedAction = {
   target?: string
 }
 
-type NotificationFormTarget = NotificationTarget
+type NotificationFormTarget = {
+  id: string
+  type: ChannelKind
+  enabled: boolean
+  values: Record<string, string>
+}
 
 type ApnFormState = {
   apn: string
@@ -261,34 +285,349 @@ function signalVariant(signalValue: string) {
   return "destructive" as const
 }
 
+const NOTIFICATION_CHANNEL_DEFINITIONS: Record<ChannelKind, NotificationChannelDefinition> = {
+  bark: {
+    type: "bark",
+    label: "Bark",
+    description: "适合 iPhone 和 Apple 设备，填写服务器地址与设备 Key。",
+    fields: [
+      { key: "server_url", label: "服务器地址", placeholder: "https://api.day.app", required: true, inputType: "url" },
+      { key: "device_key", label: "Device Key", placeholder: "输入 Bark 的 Device Key", required: true },
+      { key: "group", label: "分组", placeholder: "sms" },
+      {
+        key: "level",
+        label: "推送级别",
+        placeholder: "选择推送级别",
+        options: [
+          { label: "active", value: "active" },
+          { label: "timeSensitive", value: "timeSensitive" },
+          { label: "passive", value: "passive" },
+        ],
+      },
+    ],
+    createValues: () => ({
+      server_url: "https://api.day.app",
+      device_key: "",
+      group: "sms",
+      level: "active",
+    }),
+  },
+  telegram: {
+    type: "telegram",
+    label: "Telegram",
+    description: "通过 Telegram Bot 推送，填写 Bot Token 和 Chat ID。",
+    fields: [
+      { key: "bot_token", label: "Bot Token", placeholder: "123456:ABCDEF...", required: true, inputType: "password" },
+      { key: "chat_id", label: "Chat ID", placeholder: "例如 123456789", required: true },
+    ],
+    createValues: () => ({
+      bot_token: "",
+      chat_id: "",
+    }),
+  },
+  gotify: {
+    type: "gotify",
+    label: "Gotify",
+    description: "适合自建 Gotify 服务，填写服务器地址和应用 Token。",
+    fields: [
+      { key: "server_url", label: "服务器地址", placeholder: "https://push.example.com", required: true, inputType: "url" },
+      { key: "token", label: "应用 Token", placeholder: "输入 Gotify Token", required: true, inputType: "password" },
+      { key: "priority", label: "优先级", placeholder: "可留空，例如 5" },
+    ],
+    createValues: () => ({
+      server_url: "",
+      token: "",
+      priority: "",
+    }),
+  },
+  ntfy: {
+    type: "ntfy",
+    label: "ntfy",
+    description: "适合 ntfy.sh 或自建 ntfy，填写服务器地址与主题名。",
+    fields: [
+      { key: "server_url", label: "服务器地址", placeholder: "https://ntfy.sh", required: true, inputType: "url" },
+      { key: "topic", label: "主题", placeholder: "例如 esim-sms", required: true },
+      { key: "token", label: "访问 Token", placeholder: "需要鉴权时填写", inputType: "password" },
+    ],
+    createValues: () => ({
+      server_url: "https://ntfy.sh",
+      topic: "",
+      token: "",
+    }),
+  },
+  discord: {
+    type: "discord",
+    label: "Discord",
+    description: "填写 Discord Webhook ID 与 Token。",
+    fields: [
+      { key: "webhook_id", label: "Webhook ID", placeholder: "输入 Discord Webhook ID", required: true },
+      { key: "webhook_token", label: "Webhook Token", placeholder: "输入 Discord Webhook Token", required: true, inputType: "password" },
+    ],
+    createValues: () => ({
+      webhook_id: "",
+      webhook_token: "",
+    }),
+  },
+  custom: {
+    type: "custom",
+    label: "自定义",
+    description: "高级模式，直接保存一条完整的 Apprise URL。",
+    fields: [
+      { key: "custom_label", label: "显示名称", placeholder: "例如 Webhook", required: true },
+      { key: "url", label: "Apprise URL", placeholder: "输入完整的 Apprise URL", required: true },
+    ],
+    createValues: () => ({
+      custom_label: "",
+      url: "",
+    }),
+  },
+}
+
+const NOTIFICATION_CHANNEL_ORDER: ChannelKind[] = ["bark", "telegram", "gotify", "ntfy", "discord", "custom"]
+
+const NOTIFICATION_CHANNEL_ALIASES: Record<string, ChannelKind> = {
+  bark: "bark",
+  barks: "bark",
+  telegram: "telegram",
+  tgram: "telegram",
+  gotify: "gotify",
+  gotifys: "gotify",
+  ntfy: "ntfy",
+  ntfys: "ntfy",
+  discord: "discord",
+  custom: "custom",
+}
+
 function inferNotificationType(url: string, fallback = "apprise") {
   const match = url.trim().match(/^([a-z0-9+.-]+):\/\//i)
   return match?.[1]?.toLowerCase() || fallback
 }
 
-function createNotificationTarget(overrides: Partial<NotificationFormTarget> = {}): NotificationFormTarget {
-  const url = overrides.url ?? ""
-  const randomId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  return {
-    id: overrides.id ?? `notification-${randomId}`,
-    label: overrides.label ?? "",
-    url,
-    enabled: overrides.enabled ?? true,
-    type: overrides.type ?? inferNotificationType(url),
+function normalizeServerUrl(value: string) {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  const normalized = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
+  try {
+    return new URL(normalized)
+  } catch {
+    return null
   }
 }
 
+function convertCustomSchemeUrl(url: string, secureScheme: string, insecureScheme: string) {
+  if (url.startsWith(`${secureScheme}://`)) return new URL(url.replace(`${secureScheme}://`, "https://"))
+  if (url.startsWith(`${insecureScheme}://`)) return new URL(url.replace(`${insecureScheme}://`, "http://"))
+  return null
+}
+
+function notificationChannelType(rawType: string, url: string): ChannelKind {
+  const direct = NOTIFICATION_CHANNEL_ALIASES[rawType.trim().toLowerCase()]
+  if (direct) return direct
+
+  const inferred = inferNotificationType(url, "").toLowerCase()
+  if (NOTIFICATION_CHANNEL_ALIASES[inferred]) return NOTIFICATION_CHANNEL_ALIASES[inferred]
+
+  if (/^https:\/\/discord(?:app)?\.com\/api\/webhooks\//i.test(url.trim())) return "discord"
+  return "custom"
+}
+
+function createNotificationTarget(type: ChannelKind, overrides: Partial<NotificationFormTarget> = {}): NotificationFormTarget {
+  const randomId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const definition = NOTIFICATION_CHANNEL_DEFINITIONS[type]
+  return {
+    id: overrides.id ?? `notification-${randomId}`,
+    type,
+    enabled: overrides.enabled ?? true,
+    values: {
+      ...definition.createValues(),
+      ...(overrides.values ?? {}),
+    },
+  }
+}
+
+function buildNotificationUrl(target: NotificationFormTarget) {
+  const values = target.values
+  switch (target.type) {
+    case "bark": {
+      const server = normalizeServerUrl(values.server_url ?? "")
+      if (!server) return ""
+      const scheme = server.protocol === "http:" ? "bark" : "barks"
+      const pathSegments = server.pathname.split("/").filter(Boolean)
+      const deviceKey = values.device_key?.trim() ?? ""
+      const query = new URLSearchParams()
+      if (values.group?.trim()) query.set("group", values.group.trim())
+      if (values.level?.trim()) query.set("level", values.level.trim())
+      const nextPath = [...pathSegments, deviceKey].filter(Boolean).join("/")
+      const queryText = query.toString()
+      return `${scheme}://${server.host}${nextPath ? `/${nextPath}` : ""}${queryText ? `?${queryText}` : ""}`
+    }
+    case "telegram": {
+      const botToken = values.bot_token?.trim() ?? ""
+      const chatId = values.chat_id?.trim() ?? ""
+      return botToken && chatId ? `tgram://${botToken}/${chatId}` : ""
+    }
+    case "gotify": {
+      const server = normalizeServerUrl(values.server_url ?? "")
+      if (!server) return ""
+      const scheme = server.protocol === "http:" ? "gotify" : "gotifys"
+      const pathSegments = server.pathname.split("/").filter(Boolean)
+      const token = values.token?.trim() ?? ""
+      const priority = values.priority?.trim() ?? ""
+      const query = new URLSearchParams()
+      if (priority) query.set("priority", priority)
+      const nextPath = [...pathSegments, token].filter(Boolean).join("/")
+      const queryText = query.toString()
+      return `${scheme}://${server.host}${nextPath ? `/${nextPath}` : ""}${queryText ? `?${queryText}` : ""}`
+    }
+    case "ntfy": {
+      const server = normalizeServerUrl(values.server_url ?? "")
+      if (!server) return ""
+      const scheme = server.protocol === "http:" ? "ntfy" : "ntfys"
+      const pathSegments = server.pathname.split("/").filter(Boolean)
+      const topic = values.topic?.trim() ?? ""
+      const token = values.token?.trim() ?? ""
+      const authPrefix = token ? `${encodeURIComponent(token)}@` : ""
+      const nextPath = [...pathSegments, topic].filter(Boolean).join("/")
+      return `${scheme}://${authPrefix}${server.host}${nextPath ? `/${nextPath}` : ""}`
+    }
+    case "discord": {
+      const webhookId = values.webhook_id?.trim() ?? ""
+      const webhookToken = values.webhook_token?.trim() ?? ""
+      return webhookId && webhookToken ? `discord://${webhookId}/${webhookToken}` : ""
+    }
+    case "custom":
+      return values.url?.trim() ?? ""
+  }
+}
+
+function parseNotificationTarget(target: NotificationTarget): NotificationFormTarget {
+  const type = notificationChannelType(target.type ?? "", target.url ?? "")
+  const enabled = target.enabled ?? true
+  const id = target.id
+  const url = target.url ?? ""
+
+  if (type === "bark") {
+    const parsed = convertCustomSchemeUrl(url, "barks", "bark")
+    if (!parsed) return createNotificationTarget("bark", { id, enabled })
+    const segments = parsed.pathname.split("/").filter(Boolean)
+    const deviceKey = decodeURIComponent(segments.pop() ?? "")
+    const serverUrl = `${parsed.protocol}//${parsed.host}${segments.length ? `/${segments.join("/")}` : ""}`
+    return createNotificationTarget("bark", {
+      id,
+      enabled,
+      values: {
+        server_url: serverUrl,
+        device_key: deviceKey,
+        group: parsed.searchParams.get("group") ?? "sms",
+        level: parsed.searchParams.get("level") ?? "active",
+      },
+    })
+  }
+
+  if (type === "telegram") {
+    const match = url.trim().match(/^tgram:\/\/([^/]+)\/([^/?#]+)/i)
+    return createNotificationTarget("telegram", {
+      id,
+      enabled,
+      values: {
+        bot_token: decodeURIComponent(match?.[1] ?? ""),
+        chat_id: decodeURIComponent(match?.[2] ?? ""),
+      },
+    })
+  }
+
+  if (type === "gotify") {
+    const parsed = convertCustomSchemeUrl(url, "gotifys", "gotify")
+    if (!parsed) return createNotificationTarget("gotify", { id, enabled })
+    const segments = parsed.pathname.split("/").filter(Boolean)
+    const token = decodeURIComponent(segments.pop() ?? "")
+    const serverUrl = `${parsed.protocol}//${parsed.host}${segments.length ? `/${segments.join("/")}` : ""}`
+    return createNotificationTarget("gotify", {
+      id,
+      enabled,
+      values: {
+        server_url: serverUrl,
+        token,
+        priority: parsed.searchParams.get("priority") ?? "",
+      },
+    })
+  }
+
+  if (type === "ntfy") {
+    const parsed = convertCustomSchemeUrl(url, "ntfys", "ntfy")
+    if (!parsed) return createNotificationTarget("ntfy", { id, enabled })
+    const segments = parsed.pathname.split("/").filter(Boolean)
+    const topic = decodeURIComponent(segments.pop() ?? "")
+    const serverUrl = `${parsed.protocol}//${parsed.host}${segments.length ? `/${segments.join("/")}` : ""}`
+    return createNotificationTarget("ntfy", {
+      id,
+      enabled,
+      values: {
+        server_url: serverUrl,
+        topic,
+        token: decodeURIComponent(parsed.username ?? ""),
+      },
+    })
+  }
+
+  if (type === "discord") {
+    if (/^discord:\/\//i.test(url.trim())) {
+      const match = url.trim().match(/^discord:\/\/([^/]+)\/([^/?#]+)/i)
+      return createNotificationTarget("discord", {
+        id,
+        enabled,
+        values: {
+          webhook_id: decodeURIComponent(match?.[1] ?? ""),
+          webhook_token: decodeURIComponent(match?.[2] ?? ""),
+        },
+      })
+    }
+
+    const parsed = normalizeServerUrl(url)
+    const segments = parsed?.pathname.split("/").filter(Boolean) ?? []
+    const webhookIndex = segments.findIndex((segment) => segment === "webhooks")
+    return createNotificationTarget("discord", {
+      id,
+      enabled,
+      values: {
+        webhook_id: webhookIndex >= 0 ? decodeURIComponent(segments[webhookIndex + 1] ?? "") : "",
+        webhook_token: webhookIndex >= 0 ? decodeURIComponent(segments[webhookIndex + 2] ?? "") : "",
+      },
+    })
+  }
+
+  return createNotificationTarget("custom", {
+    id,
+    enabled,
+    values: {
+      custom_label: target.label ?? "",
+      url,
+    },
+  })
+}
+
 function normalizeNotificationTargets(targets: NotificationTarget[] = []) {
-  return targets.map((target) =>
-    createNotificationTarget({
-      ...target,
-      id: target.id,
-      label: target.label ?? "",
-      url: target.url ?? "",
-      enabled: target.enabled ?? true,
-      type: target.type ?? inferNotificationType(target.url ?? ""),
-    }),
+  const seenTypes = new Set<ChannelKind>()
+  const normalized: NotificationFormTarget[] = []
+  for (const target of targets) {
+    const parsed = parseNotificationTarget(target)
+    if (seenTypes.has(parsed.type)) continue
+    seenTypes.add(parsed.type)
+    normalized.push(parsed)
+  }
+  return normalized.sort(
+    (left, right) =>
+      NOTIFICATION_CHANNEL_ORDER.indexOf(left.type) - NOTIFICATION_CHANNEL_ORDER.indexOf(right.type),
   )
+}
+
+function notificationChannelLabel(target: NotificationFormTarget) {
+  if (target.type === "custom") return target.values.custom_label?.trim() || "自定义"
+  return NOTIFICATION_CHANNEL_DEFINITIONS[target.type].label
+}
+
+function notificationFieldValue(target: NotificationFormTarget, fieldKey: string) {
+  return target.values[fieldKey] ?? ""
 }
 
 function getNotifications(status: StatusData | null | undefined) {
@@ -336,6 +675,7 @@ function App() {
   const [activeAction, setActiveAction] = useState<PersistedAction | null>(null)
   const [submittingActionLabel, setSubmittingActionLabel] = useState<string | null>(null)
   const [notificationTargets, setNotificationTargets] = useState<NotificationFormTarget[]>([])
+  const [newNotificationType, setNewNotificationType] = useState<ChannelKind>("bark")
   const [apnForm, setApnForm] = useState<ApnFormState>({
     apn: "",
     username: "",
@@ -497,29 +837,37 @@ function App() {
       return
     }
 
-    const hasInvalidTarget = notificationTargets.some((target) => !target.label.trim() || !target.url.trim())
-    if (hasInvalidTarget) {
-      toast.error("请先填写完整的渠道标签和 Apprise URL")
-      return
-    }
-
-    const payloadTargets = notificationTargets.map((target, index) => ({
-      ...target,
-      id: target.id || `notification-${index + 1}`,
-      label: target.label.trim() || `渠道 ${index + 1}`,
-      url: target.url.trim(),
-      enabled: target.enabled,
-      type: inferNotificationType(target.url, target.type || "apprise"),
-    }))
-
-    setSubmittingActionLabel("保存通知渠道")
-    appendLog({
-      time: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
-      level: "info",
-      message: `准备执行：保存通知渠道（${payloadTargets.length} 条）`,
-    })
-
     try {
+      const payloadTargets = notificationTargets.map((target, index) => {
+        const definition = NOTIFICATION_CHANNEL_DEFINITIONS[target.type]
+        const missingField = definition.fields.find(
+          (field) => field.required && !notificationFieldValue(target, field.key).trim(),
+        )
+        if (missingField) {
+          throw new Error(`${definition.label} 还缺少 ${missingField.label}`)
+        }
+
+        const url = buildNotificationUrl(target)
+        if (!url.trim()) {
+          throw new Error(`${definition.label} 配置还不完整`)
+        }
+
+        return {
+          id: target.id || `notification-${index + 1}`,
+          label: notificationChannelLabel(target),
+          url,
+          enabled: target.enabled,
+          type: target.type,
+        }
+      })
+
+      setSubmittingActionLabel("保存通知渠道")
+      appendLog({
+        time: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
+        level: "info",
+        message: `准备执行：保存通知渠道（${payloadTargets.length} 条）`,
+      })
+
       const response = await requestJson<{ ok: boolean; status?: StatusData }>("/api/notifications", {
         method: "POST",
         body: JSON.stringify({
@@ -590,6 +938,17 @@ function App() {
     }
   }, [])
 
+  useEffect(() => {
+    const usedTypes = new Set(notificationTargets.map((target) => target.type))
+    const nextType =
+      NOTIFICATION_CHANNEL_ORDER.find((type) => !usedTypes.has(type) && type === newNotificationType) ??
+      NOTIFICATION_CHANNEL_ORDER.find((type) => !usedTypes.has(type)) ??
+      "custom"
+    if (nextType !== newNotificationType) {
+      setNewNotificationType(nextType)
+    }
+  }, [newNotificationType, notificationTargets])
+
   const activeProfile = getActiveProfile(status?.profiles ?? [])
   const esimEnabled = status?.capabilities.esim_management_enabled ?? true
   const activeProfileLabel = esimEnabled ? activeProfile?.display_name || "未检测到" : "普通 SIM"
@@ -602,6 +961,8 @@ function App() {
   const configuredCount = notifications.configured_count
   const actionBusy = Boolean(activeAction || submittingActionLabel)
   const shellActionLabel = activeAction?.label || submittingActionLabel
+  const configuredNotificationTypes = new Set(notificationTargets.map((target) => target.type))
+  const availableNotificationTypes = NOTIFICATION_CHANNEL_ORDER.filter((type) => !configuredNotificationTypes.has(type))
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(14,165,233,0.18),_transparent_30%),linear-gradient(180deg,_#f7f9fc_0%,_#eef3f7_100%)]">
@@ -1187,48 +1548,82 @@ function App() {
                         <div>
                           <h3 className="font-medium">通知渠道配置</h3>
                           <p className="text-sm text-muted-foreground">
-                            使用 Apprise URL 配置多个通知渠道，标签会显示在首页与服务状态卡片中。
+                            先选择渠道类型再添加，每种渠道只保留一份，表单会按渠道类型显示对应字段。
                           </p>
                         </div>
                       </div>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        disabled={actionBusy}
-                        onClick={() => {
-                          notificationsDirtyRef.current = true
-                          setNotificationTargets((current) => [...current, createNotificationTarget()])
-                        }}
-                      >
-                        <PlusIcon data-icon="inline-start" />
-                        新增渠道
-                      </Button>
+                      <div className="flex w-full flex-col gap-2 sm:w-auto sm:min-w-72">
+                        <Select
+                          value={newNotificationType}
+                          onValueChange={(value) => {
+                            setNewNotificationType(value as ChannelKind)
+                          }}
+                          disabled={actionBusy || !availableNotificationTypes.length}
+                        >
+                          <SelectTrigger className="w-full">
+                            <SelectValue placeholder="选择通知渠道" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectGroup>
+                              <SelectLabel>可添加渠道</SelectLabel>
+                              {availableNotificationTypes.map((type) => (
+                                <SelectItem key={type} value={type}>
+                                  {NOTIFICATION_CHANNEL_DEFINITIONS[type].label}
+                                </SelectItem>
+                              ))}
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={actionBusy || !availableNotificationTypes.length}
+                          onClick={() => {
+                            notificationsDirtyRef.current = true
+                            setNotificationTargets((current) => {
+                              if (current.some((item) => item.type === newNotificationType)) return current
+                              const next = [...current, createNotificationTarget(newNotificationType)]
+                              return next.sort(
+                                (left, right) =>
+                                  NOTIFICATION_CHANNEL_ORDER.indexOf(left.type) -
+                                  NOTIFICATION_CHANNEL_ORDER.indexOf(right.type),
+                              )
+                            })
+                          }}
+                        >
+                          <PlusIcon data-icon="inline-start" />
+                          添加渠道
+                        </Button>
+                      </div>
                     </div>
                     <div className="flex flex-col gap-4">
                       {notificationTargets.length ? (
-                        notificationTargets.map((target, index) => (
+                        notificationTargets.map((target) => {
+                          const definition = NOTIFICATION_CHANNEL_DEFINITIONS[target.type]
+                          return (
                           <div key={target.id} className="rounded-2xl border border-border/70 bg-white/80 p-4 shadow-sm">
                             <div className="flex flex-col gap-4">
                               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                                <div className="flex items-center gap-2">
-                                  <Badge variant="outline">渠道 {index + 1}</Badge>
-                                  <Badge variant="secondary">{target.type || "apprise"}</Badge>
+                                <div className="flex flex-col gap-2">
+                                  <div className="flex items-center gap-2">
+                                    <Badge variant="outline">{definition.label}</Badge>
+                                    <Badge variant="secondary">{target.enabled ? "已启用" : "已停用"}</Badge>
+                                  </div>
+                                  <p className="text-sm text-muted-foreground">{definition.description}</p>
                                 </div>
                                 <div className="flex items-center gap-3">
                                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                                    <span>{target.enabled ? "启用中" : "已停用"}</span>
+                                    <span>启用转发</span>
                                     <Switch
                                       checked={target.enabled}
                                       onCheckedChange={(checked) => {
                                         notificationsDirtyRef.current = true
                                         setNotificationTargets((current) =>
-                                          current.map((item, itemIndex) =>
-                                            itemIndex === index ? { ...item, enabled: checked } : item,
-                                          ),
+                                          current.map((item) => (item.id === target.id ? { ...item, enabled: checked } : item)),
                                         )
                                       }}
-                                      aria-label={`切换渠道 ${index + 1} 启用状态`}
+                                      aria-label={`切换 ${definition.label} 启用状态`}
                                     />
                                   </div>
                                   <Button
@@ -1239,7 +1634,7 @@ function App() {
                                     onClick={() => {
                                       notificationsDirtyRef.current = true
                                       setNotificationTargets((current) =>
-                                        current.filter((_, itemIndex) => itemIndex !== index),
+                                        current.filter((item) => item.id !== target.id),
                                       )
                                     }}
                                   >
@@ -1248,66 +1643,81 @@ function App() {
                                   </Button>
                                 </div>
                               </div>
-                              <div className="grid gap-4 md:grid-cols-[0.9fr_1.1fr]">
-                                <div className="grid gap-2">
-                                  <Label htmlFor={`notification-label-${target.id}`}>标签</Label>
-                                  <Input
-                                    id={`notification-label-${target.id}`}
-                                    value={target.label}
-                                    onChange={(event) => {
-                                      notificationsDirtyRef.current = true
-                                      setNotificationTargets((current) =>
-                                        current.map((item, itemIndex) =>
-                                          itemIndex === index ? { ...item, label: event.target.value } : item,
-                                        ),
-                                      )
-                                    }}
-                                    placeholder="例如 Bark、Telegram、Gotify"
-                                  />
-                                </div>
-                                <div className="grid gap-2">
-                                  <Label htmlFor={`notification-url-${target.id}`}>Apprise URL</Label>
-                                  <Input
-                                    id={`notification-url-${target.id}`}
-                                    value={target.url}
-                                    onChange={(event) => {
-                                      notificationsDirtyRef.current = true
-                                      setNotificationTargets((current) =>
-                                        current.map((item, itemIndex) =>
-                                          itemIndex === index
-                                            ? {
-                                                ...item,
-                                                url: event.target.value,
-                                                type: inferNotificationType(event.target.value, item.type || "apprise"),
-                                              }
-                                            : item,
-                                        ),
-                                      )
-                                    }}
-                                    placeholder="例如 tgram://bot_token/chat_id 或 bark://device_key"
-                                  />
-                                </div>
+                              <div className="grid gap-4 md:grid-cols-2">
+                                {definition.fields.map((field) => (
+                                  <div key={`${target.id}-${field.key}`} className="grid gap-2">
+                                    <Label htmlFor={`notification-${target.id}-${field.key}`}>
+                                      {field.label}
+                                    </Label>
+                                    {field.options ? (
+                                      <Select
+                                        value={notificationFieldValue(target, field.key)}
+                                        onValueChange={(value) => {
+                                          const nextValue = value ?? ""
+                                          notificationsDirtyRef.current = true
+                                          setNotificationTargets((current) =>
+                                            current.map((item) =>
+                                              item.id === target.id
+                                                ? {
+                                                    ...item,
+                                                    values: {
+                                                      ...item.values,
+                                                      [field.key]: nextValue,
+                                                    },
+                                                  }
+                                                : item,
+                                            ),
+                                          )
+                                        }}
+                                      >
+                                        <SelectTrigger id={`notification-${target.id}-${field.key}`} className="w-full">
+                                          <SelectValue placeholder={field.placeholder} />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                          <SelectGroup>
+                                            {field.options.map((option) => (
+                                              <SelectItem key={option.value} value={option.value}>
+                                                {option.label}
+                                              </SelectItem>
+                                            ))}
+                                          </SelectGroup>
+                                        </SelectContent>
+                                      </Select>
+                                    ) : (
+                                      <Input
+                                        id={`notification-${target.id}-${field.key}`}
+                                        type={field.inputType ?? "text"}
+                                        value={notificationFieldValue(target, field.key)}
+                                        onChange={(event) => {
+                                          notificationsDirtyRef.current = true
+                                          setNotificationTargets((current) =>
+                                            current.map((item) =>
+                                              item.id === target.id
+                                                ? {
+                                                    ...item,
+                                                    values: {
+                                                      ...item.values,
+                                                      [field.key]: event.target.value,
+                                                    },
+                                                  }
+                                                : item,
+                                            ),
+                                          )
+                                        }}
+                                        placeholder={field.placeholder}
+                                      />
+                                    )}
+                                  </div>
+                                ))}
                               </div>
                             </div>
                           </div>
-                        ))
+                        )})
                       ) : (
                         <div className="flex min-h-48 flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-border/70 bg-white/80 px-6 text-center">
                           <p className="max-w-md text-sm text-muted-foreground">
-                            当前还没有配置通知渠道。新增一个 Apprise 渠道后，短信转发卡片会显示对应标签。
+                            当前还没有配置通知渠道。先从上方选择一个渠道类型，再添加到列表里继续填写。
                           </p>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            disabled={actionBusy}
-                            onClick={() => {
-                              notificationsDirtyRef.current = true
-                              setNotificationTargets([createNotificationTarget()])
-                            }}
-                          >
-                            <PlusIcon data-icon="inline-start" />
-                            添加第一个渠道
-                          </Button>
                         </div>
                       )}
                       <div className="flex flex-wrap gap-2">
