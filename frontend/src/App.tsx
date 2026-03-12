@@ -11,6 +11,7 @@ import {
   ChevronDownIcon,
   LoaderCircleIcon,
   MessageSquareTextIcon,
+  PlusIcon,
   RadioTowerIcon,
   RefreshCwIcon,
   RouterIcon,
@@ -20,6 +21,7 @@ import {
   SignalIcon,
   CardSimIcon,
   TerminalSquareIcon,
+  Trash2Icon,
   WifiIcon,
 } from "lucide-react"
 import { Toaster, toast } from "sonner"
@@ -104,14 +106,21 @@ type StatusData = {
     sms_forwarder: string
     web_admin: string
   }
-  bark: {
-    base_url: string
-    device_key: string
-    group: string
-    level: string
+  notifications?: {
+    configured_count: number
+    configured_labels: string[]
+    targets: NotificationTarget[]
   }
   sms: SmsItem[]
   timestamp: string
+}
+
+type NotificationTarget = {
+  id: string
+  label: string
+  url: string
+  enabled: boolean
+  type: string
 }
 
 type ActionLevel = "info" | "warning" | "error" | "command"
@@ -130,7 +139,7 @@ type ActionName =
   | "restart_sms"
   | "resend_last_sms"
   | "save_apn"
-  | "save_bark"
+  | "save_notifications"
   | "apply_radio_mode"
   | "apply_network_selection"
 
@@ -154,12 +163,7 @@ type PersistedAction = {
   target?: string
 }
 
-type BarkFormState = {
-  base_url: string
-  device_key: string
-  group: string
-  level: string
-}
+type NotificationFormTarget = NotificationTarget
 
 type ApnFormState = {
   apn: string
@@ -169,6 +173,11 @@ type ApnFormState = {
 }
 
 const ACTIVE_ACTION_KEY = "ess-active-action"
+const EMPTY_NOTIFICATIONS = {
+  configured_count: 0,
+  configured_labels: [],
+  targets: [],
+} satisfies NonNullable<StatusData["notifications"]>
 
 async function requestJson<T>(input: string, init?: RequestInit): Promise<T> {
   const response = await fetch(input, {
@@ -252,10 +261,38 @@ function signalVariant(signalValue: string) {
   return "destructive" as const
 }
 
-function maskDeviceKey(deviceKey: string) {
-  if (!deviceKey) return "未配置"
-  if (deviceKey.length <= 8) return deviceKey
-  return `${deviceKey.slice(0, 4)}...${deviceKey.slice(-4)}`
+function inferNotificationType(url: string, fallback = "apprise") {
+  const match = url.trim().match(/^([a-z0-9+.-]+):\/\//i)
+  return match?.[1]?.toLowerCase() || fallback
+}
+
+function createNotificationTarget(overrides: Partial<NotificationFormTarget> = {}): NotificationFormTarget {
+  const url = overrides.url ?? ""
+  const randomId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  return {
+    id: overrides.id ?? `notification-${randomId}`,
+    label: overrides.label ?? "",
+    url,
+    enabled: overrides.enabled ?? true,
+    type: overrides.type ?? inferNotificationType(url),
+  }
+}
+
+function normalizeNotificationTargets(targets: NotificationTarget[] = []) {
+  return targets.map((target) =>
+    createNotificationTarget({
+      ...target,
+      id: target.id,
+      label: target.label ?? "",
+      url: target.url ?? "",
+      enabled: target.enabled ?? true,
+      type: target.type ?? inferNotificationType(target.url ?? ""),
+    }),
+  )
+}
+
+function getNotifications(status: StatusData | null | undefined) {
+  return status?.notifications ?? EMPTY_NOTIFICATIONS
 }
 
 function getActiveProfile(profiles: Profile[]) {
@@ -281,8 +318,8 @@ function friendlyActionName(action: ActionName) {
       return "重发最后一条短信"
     case "save_apn":
       return "保存 APN"
-    case "save_bark":
-      return "保存 Bark"
+    case "save_notifications":
+      return "保存通知渠道"
     case "apply_radio_mode":
       return "应用网络制式"
     case "apply_network_selection":
@@ -298,12 +335,7 @@ function App() {
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [activeAction, setActiveAction] = useState<PersistedAction | null>(null)
   const [submittingActionLabel, setSubmittingActionLabel] = useState<string | null>(null)
-  const [barkForm, setBarkForm] = useState<BarkFormState>({
-    base_url: "",
-    device_key: "",
-    group: "sms",
-    level: "active",
-  })
+  const [notificationTargets, setNotificationTargets] = useState<NotificationFormTarget[]>([])
   const [apnForm, setApnForm] = useState<ApnFormState>({
     apn: "",
     username: "",
@@ -314,7 +346,7 @@ function App() {
   const [radioMode, setRadioMode] = useState("3g4g_prefer4g")
   const [advancedOpen, setAdvancedOpen] = useState(false)
 
-  const barkDirtyRef = useRef(false)
+  const notificationsDirtyRef = useRef(false)
   const apnDirtyRef = useRef(false)
   const networkDirtyRef = useRef(false)
   const radioModeDirtyRef = useRef(false)
@@ -325,13 +357,8 @@ function App() {
   }, [])
 
   const syncFormsFromStatus = useCallback((snapshot: StatusData) => {
-    if (!barkDirtyRef.current) {
-      setBarkForm({
-        base_url: snapshot.bark.base_url,
-        device_key: snapshot.bark.device_key,
-        group: snapshot.bark.group,
-        level: snapshot.bark.level,
-      })
+    if (!notificationsDirtyRef.current) {
+      setNotificationTargets(normalizeNotificationTargets(getNotifications(snapshot).targets))
     }
     if (!apnDirtyRef.current) {
       setApnForm({
@@ -369,7 +396,7 @@ function App() {
     window.localStorage.removeItem(ACTIVE_ACTION_KEY)
     setActiveAction(null)
     setSubmittingActionLabel(null)
-    barkDirtyRef.current = false
+    notificationsDirtyRef.current = false
     apnDirtyRef.current = false
     networkDirtyRef.current = false
     radioModeDirtyRef.current = false
@@ -411,7 +438,7 @@ function App() {
     }
   }, [appendLog, finishAction])
 
-  const runAction = useCallback(async (action: ActionName, payload: Record<string, string>, label: string) => {
+  const runAction = useCallback(async (action: ActionName, payload: Record<string, unknown>, label: string) => {
     if (activeAction || submittingActionLabel) {
       toast.info("当前已有任务在执行，请稍等")
       return
@@ -436,7 +463,12 @@ function App() {
         action,
         label,
         cursor: 0,
-        target: payload.iccid || payload.operator_code || "",
+        target:
+          typeof payload.iccid === "string"
+            ? payload.iccid
+            : typeof payload.operator_code === "string"
+              ? payload.operator_code
+              : "",
       }
       setActiveAction(persisted)
       setSubmittingActionLabel(null)
@@ -458,6 +490,71 @@ function App() {
       toast.error(message)
     }
   }, [activeAction, appendLog, pollAction, status?.capabilities.esim_management_enabled, submittingActionLabel])
+
+  const saveNotifications = useCallback(async () => {
+    if (activeAction || submittingActionLabel) {
+      toast.info("当前已有任务在执行，请稍等")
+      return
+    }
+
+    const hasInvalidTarget = notificationTargets.some((target) => !target.label.trim() || !target.url.trim())
+    if (hasInvalidTarget) {
+      toast.error("请先填写完整的渠道标签和 Apprise URL")
+      return
+    }
+
+    const payloadTargets = notificationTargets.map((target, index) => ({
+      ...target,
+      id: target.id || `notification-${index + 1}`,
+      label: target.label.trim() || `渠道 ${index + 1}`,
+      url: target.url.trim(),
+      enabled: target.enabled,
+      type: inferNotificationType(target.url, target.type || "apprise"),
+    }))
+
+    setSubmittingActionLabel("保存通知渠道")
+    appendLog({
+      time: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
+      level: "info",
+      message: `准备执行：保存通知渠道（${payloadTargets.length} 条）`,
+    })
+
+    try {
+      const response = await requestJson<{ ok: boolean; status?: StatusData }>("/api/notifications", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "save_notifications",
+          targets: payloadTargets,
+        }),
+      })
+
+      notificationsDirtyRef.current = false
+      setSubmittingActionLabel(null)
+
+      if (response.status) {
+        setStatus(response.status)
+        syncFormsFromStatus(response.status)
+      } else {
+        await refreshStatus(false)
+      }
+
+      appendLog({
+        time: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
+        level: "info",
+        message: "通知渠道已保存",
+      })
+      toast.success("通知渠道配置已保存")
+    } catch (error) {
+      setSubmittingActionLabel(null)
+      const message = error instanceof Error ? error.message : "保存通知渠道失败"
+      appendLog({
+        time: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
+        level: "error",
+        message,
+      })
+      toast.error(message)
+    }
+  }, [activeAction, appendLog, notificationTargets, refreshStatus, submittingActionLabel, syncFormsFromStatus])
 
   useEffect(() => {
     void refreshStatus(true)
@@ -500,6 +597,9 @@ function App() {
     ? `手机号：${status?.modem.number || "--"}`
     : `手机号：${status?.modem.number || "--"}`
   const profileCountLabel = esimEnabled ? `${status?.profiles.length ?? 0} 个` : "已禁用"
+  const notifications = getNotifications(status)
+  const configuredLabels = notifications.configured_labels
+  const configuredCount = notifications.configured_count
   const actionBusy = Boolean(activeAction || submittingActionLabel)
   const shellActionLabel = activeAction?.label || submittingActionLabel
 
@@ -598,7 +698,9 @@ function App() {
                 icon={WifiIcon}
                 label="短信转发"
                 value={status?.services.sms_forwarder || "--"}
-                hint={`Bark ${maskDeviceKey(status?.bark.device_key || "")}`}
+                hint={configuredCount ? `已配置 ${configuredCount} 个通知渠道` : "尚未配置通知渠道"}
+                tags={configuredLabels}
+                emptyTagLabel="未配置通知渠道"
                 badgeVariant={serviceVariant(status?.services.sms_forwarder || "")}
               />
             </div>
@@ -777,7 +879,7 @@ function App() {
                     <EmptyState
                       icon={MessageSquareTextIcon}
                       title="最近还没有短信"
-                      description="收到短信后会自动出现在这里，并参与 Bark 转发。"
+                      description="收到短信后会自动出现在这里，并按通知渠道配置转发。"
                     />
                   )}
                 </div>
@@ -853,7 +955,7 @@ function App() {
                   <Settings2Icon />
                   高级设置
                 </CardTitle>
-                <CardDescription>APN、选网、网络制式和 Bark 都放在这里，避免主界面出现空白区。</CardDescription>
+                <CardDescription>APN、选网、网络制式和通知渠道都放在这里，避免主界面出现空白区。</CardDescription>
               </div>
               <CardAction>
                 <Button
@@ -877,7 +979,7 @@ function App() {
             <Tabs defaultValue="network" className="gap-4">
               <TabsList variant="line">
                 <TabsTrigger value="network">网络</TabsTrigger>
-                <TabsTrigger value="forwarder">转发</TabsTrigger>
+                <TabsTrigger value="forwarder">通知</TabsTrigger>
               </TabsList>
 
               <TabsContent value="network" className="flex flex-col gap-5">
@@ -1079,84 +1181,145 @@ function App() {
               <TabsContent value="forwarder" className="flex flex-col gap-5">
                 <div className="grid gap-5 xl:grid-cols-[1.1fr_0.9fr]">
                   <div className="rounded-2xl border border-border/70 bg-background/70 p-4">
-                    <div className="mb-4 flex items-center gap-2">
-                      <SendIcon className="text-muted-foreground" />
-                      <div>
-                        <h3 className="font-medium">Bark 推送配置</h3>
-                        <p className="text-sm text-muted-foreground">保存后会自动重启短信转发服务。</p>
-                      </div>
-                    </div>
-                    <div className="grid gap-4">
-                      <div className="grid gap-2">
-                        <Label htmlFor="bark-url">Bark 地址</Label>
-                        <Input
-                          id="bark-url"
-                          value={barkForm.base_url}
-                          onChange={(event) => {
-                            barkDirtyRef.current = true
-                            setBarkForm((current) => ({ ...current, base_url: event.target.value }))
-                          }}
-                          placeholder="https://example.com"
-                        />
-                      </div>
-                      <div className="grid gap-2">
-                        <Label htmlFor="bark-key">Device Key</Label>
-                        <Input
-                          id="bark-key"
-                          value={barkForm.device_key}
-                          onChange={(event) => {
-                            barkDirtyRef.current = true
-                            setBarkForm((current) => ({ ...current, device_key: event.target.value }))
-                          }}
-                          placeholder="输入 Bark 的 key"
-                        />
-                      </div>
-                      <div className="grid gap-4 md:grid-cols-2">
-                        <div className="grid gap-2">
-                          <Label htmlFor="bark-group">分组</Label>
-                          <Input
-                            id="bark-group"
-                            value={barkForm.group}
-                            onChange={(event) => {
-                              barkDirtyRef.current = true
-                              setBarkForm((current) => ({ ...current, group: event.target.value }))
-                            }}
-                            placeholder="sms"
-                          />
+                    <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="flex items-center gap-2">
+                        <SendIcon className="text-muted-foreground" />
+                        <div>
+                          <h3 className="font-medium">通知渠道配置</h3>
+                          <p className="text-sm text-muted-foreground">
+                            使用 Apprise URL 配置多个通知渠道，标签会显示在首页与服务状态卡片中。
+                          </p>
                         </div>
-                        <div className="grid gap-2">
-                          <Label>推送级别</Label>
-                          <Select
-                            value={barkForm.level}
-                            onValueChange={(value) => {
-                              barkDirtyRef.current = true
-                              setBarkForm((current) => ({ ...current, level: value ?? current.level }))
+                      </div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={actionBusy}
+                        onClick={() => {
+                          notificationsDirtyRef.current = true
+                          setNotificationTargets((current) => [...current, createNotificationTarget()])
+                        }}
+                      >
+                        <PlusIcon data-icon="inline-start" />
+                        新增渠道
+                      </Button>
+                    </div>
+                    <div className="flex flex-col gap-4">
+                      {notificationTargets.length ? (
+                        notificationTargets.map((target, index) => (
+                          <div key={target.id} className="rounded-2xl border border-border/70 bg-white/80 p-4 shadow-sm">
+                            <div className="flex flex-col gap-4">
+                              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                                <div className="flex items-center gap-2">
+                                  <Badge variant="outline">渠道 {index + 1}</Badge>
+                                  <Badge variant="secondary">{target.type || "apprise"}</Badge>
+                                </div>
+                                <div className="flex items-center gap-3">
+                                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                                    <span>{target.enabled ? "启用中" : "已停用"}</span>
+                                    <Switch
+                                      checked={target.enabled}
+                                      onCheckedChange={(checked) => {
+                                        notificationsDirtyRef.current = true
+                                        setNotificationTargets((current) =>
+                                          current.map((item, itemIndex) =>
+                                            itemIndex === index ? { ...item, enabled: checked } : item,
+                                          ),
+                                        )
+                                      }}
+                                      aria-label={`切换渠道 ${index + 1} 启用状态`}
+                                    />
+                                  </div>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    disabled={actionBusy}
+                                    onClick={() => {
+                                      notificationsDirtyRef.current = true
+                                      setNotificationTargets((current) =>
+                                        current.filter((_, itemIndex) => itemIndex !== index),
+                                      )
+                                    }}
+                                  >
+                                    <Trash2Icon data-icon="inline-start" />
+                                    删除
+                                  </Button>
+                                </div>
+                              </div>
+                              <div className="grid gap-4 md:grid-cols-[0.9fr_1.1fr]">
+                                <div className="grid gap-2">
+                                  <Label htmlFor={`notification-label-${target.id}`}>标签</Label>
+                                  <Input
+                                    id={`notification-label-${target.id}`}
+                                    value={target.label}
+                                    onChange={(event) => {
+                                      notificationsDirtyRef.current = true
+                                      setNotificationTargets((current) =>
+                                        current.map((item, itemIndex) =>
+                                          itemIndex === index ? { ...item, label: event.target.value } : item,
+                                        ),
+                                      )
+                                    }}
+                                    placeholder="例如 Bark、Telegram、Gotify"
+                                  />
+                                </div>
+                                <div className="grid gap-2">
+                                  <Label htmlFor={`notification-url-${target.id}`}>Apprise URL</Label>
+                                  <Input
+                                    id={`notification-url-${target.id}`}
+                                    value={target.url}
+                                    onChange={(event) => {
+                                      notificationsDirtyRef.current = true
+                                      setNotificationTargets((current) =>
+                                        current.map((item, itemIndex) =>
+                                          itemIndex === index
+                                            ? {
+                                                ...item,
+                                                url: event.target.value,
+                                                type: inferNotificationType(event.target.value, item.type || "apprise"),
+                                              }
+                                            : item,
+                                        ),
+                                      )
+                                    }}
+                                    placeholder="例如 tgram://bot_token/chat_id 或 bark://device_key"
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="flex min-h-48 flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-border/70 bg-white/80 px-6 text-center">
+                          <p className="max-w-md text-sm text-muted-foreground">
+                            当前还没有配置通知渠道。新增一个 Apprise 渠道后，短信转发卡片会显示对应标签。
+                          </p>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            disabled={actionBusy}
+                            onClick={() => {
+                              notificationsDirtyRef.current = true
+                              setNotificationTargets([createNotificationTarget()])
                             }}
                           >
-                            <SelectTrigger className="w-full">
-                              <SelectValue placeholder="选择 Bark 级别" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectGroup>
-                                <SelectLabel>Bark 级别</SelectLabel>
-                                <SelectItem value="active">active</SelectItem>
-                                <SelectItem value="timeSensitive">timeSensitive</SelectItem>
-                                <SelectItem value="passive">passive</SelectItem>
-                              </SelectGroup>
-                            </SelectContent>
-                          </Select>
+                            <PlusIcon data-icon="inline-start" />
+                            添加第一个渠道
+                          </Button>
                         </div>
-                      </div>
+                      )}
                       <div className="flex flex-wrap gap-2">
                         <Button
                           type="button"
                           disabled={actionBusy}
                           onClick={() => {
-                            void runAction("save_bark", barkForm, "保存 Bark 配置")
+                            void saveNotifications()
                           }}
                         >
                           <SendIcon data-icon="inline-start" />
-                          保存 Bark
+                          保存通知渠道
                         </Button>
                         <Button
                           type="button"
@@ -1164,7 +1327,7 @@ function App() {
                           disabled={!status}
                           onClick={() => {
                             if (!status) return
-                            barkDirtyRef.current = false
+                            notificationsDirtyRef.current = false
                             syncFormsFromStatus(status)
                           }}
                         >
@@ -1179,7 +1342,7 @@ function App() {
                       <WifiIcon className="text-muted-foreground" />
                       <div>
                         <h3 className="font-medium">服务状态</h3>
-                        <p className="text-sm text-muted-foreground">方便确认 Bark 配置和后台服务是否都在线。</p>
+                        <p className="text-sm text-muted-foreground">这里只展示服务状态和已配置渠道标签，不显示具体 URL 或密钥。</p>
                       </div>
                     </div>
                     <div className="grid gap-3">
@@ -1187,10 +1350,14 @@ function App() {
                       <ServiceLine name="短信转发" state={status?.services.sms_forwarder || "--"} />
                       <ServiceLine name="管理页面" state={status?.services.web_admin || "--"} />
                       <Separator />
-                      <div className="grid gap-1 text-sm text-muted-foreground">
-                        <span>Bark 地址：{status?.bark.base_url || "未配置"}</span>
-                        <span>Device Key：{maskDeviceKey(status?.bark.device_key || "")}</span>
-                        <span>分组：{status?.bark.group || "sms"}</span>
+                      <div className="rounded-2xl border border-border/70 bg-white/80 p-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-sm font-medium">已配置渠道标签</span>
+                          <Badge variant="secondary">{configuredCount} 个</Badge>
+                        </div>
+                        <div className="mt-3">
+                          <ChannelBadgeList labels={configuredLabels} emptyLabel="当前还没有已配置渠道" />
+                        </div>
                       </div>
                       <Button
                         type="button"
@@ -1225,7 +1392,7 @@ function App() {
               最近短信和 eSIM Profiles 都是滚动区域，会随着状态刷新自动更新，不需要手动刷新整个页面。
             </div>
             <div className="rounded-2xl border border-border/70 bg-background/70 p-4">
-              APN 和 Bark 都放进高级设置里，主界面只保留状态、切卡、短信和实时日志，减少操作分心。
+              APN 和通知渠道都放进高级设置里，主界面只保留状态、切卡、短信和实时日志，减少操作分心。
             </div>
           </CardContent>
         </Card>
@@ -1240,12 +1407,16 @@ function OverviewTile({
   label,
   value,
   hint,
+  tags,
+  emptyTagLabel,
   badgeVariant,
 }: {
   icon: typeof SignalIcon
   label: string
   value: string
   hint: string
+  tags?: string[]
+  emptyTagLabel?: string
   badgeVariant?: "default" | "secondary" | "destructive" | "outline"
 }) {
   return (
@@ -1259,6 +1430,33 @@ function OverviewTile({
       </div>
       {!badgeVariant ? <div className="text-lg font-semibold tracking-tight">{value}</div> : null}
       <p className="mt-2 whitespace-pre-line text-sm text-muted-foreground">{hint}</p>
+      {tags ? (
+        <div className="mt-3">
+          <ChannelBadgeList labels={tags} emptyLabel={emptyTagLabel || "暂无标签"} />
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function ChannelBadgeList({
+  labels,
+  emptyLabel,
+}: {
+  labels: string[]
+  emptyLabel: string
+}) {
+  if (!labels.length) {
+    return <span className="text-sm text-muted-foreground">{emptyLabel}</span>
+  }
+
+  return (
+    <div className="flex flex-wrap gap-2">
+      {labels.map((label) => (
+        <Badge key={label} variant="secondary" className="max-w-full truncate">
+          {label}
+        </Badge>
+      ))}
     </div>
   )
 }

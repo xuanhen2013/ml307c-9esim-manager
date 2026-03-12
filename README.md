@@ -3,12 +3,12 @@
 [![Build Deploy Package](https://github.com/cyDione/eSIM-SMS-Forwarder/actions/workflows/build-deploy-package.yml/badge.svg)](https://github.com/cyDione/eSIM-SMS-Forwarder/actions/workflows/build-deploy-package.yml)
 [![Latest Release](https://img.shields.io/github/v/release/cyDione/eSIM-SMS-Forwarder?display_name=tag)](https://github.com/cyDione/eSIM-SMS-Forwarder/releases/latest)
 
-一个运行在 Debian 设备上的轻量服务，用来做 eSIM 管理、短信接收、Bark 转发，以及浏览器里的可视化控制台。
+一个运行在 Debian 设备上的轻量服务，用来做 eSIM 管理、短信接收、Apprise 多渠道转发，以及浏览器里的可视化控制台。
 
 项目目标很直接：
 
 - 在支持 eUICC 的设备上切换内置 eSIM Profile
-- 接收短信并转发到 Bark
+- 接收短信并转发到 Apprise 多渠道
 - 提供低负载、可实时反馈执行进度的 Web 管理页面
 - 兼容普通 SIM 场景，只启用短信转发，不安装 `lpac`
 
@@ -24,7 +24,7 @@
 ### 短信转发
 
 - 通过 `ModemManager` 读取短信
-- 自动转发新短信到 Bark
+- 自动转发新短信到 Apprise 渠道
 - 自动处理中文转义内容
 - 自动尝试解码 Base64 短信正文
 - 支持在页面里查看最近短信
@@ -36,7 +36,7 @@
 - 重启基带
 - 重启短信转发服务
 - 配置 APN、网络制式、手动选网
-- 在高级设置里维护 Bark 参数
+- 在高级设置里维护通知渠道
 
 ### Web 控制台
 
@@ -91,7 +91,7 @@ curl -fsSL https://raw.githubusercontent.com/cyDione/eSIM-SMS-Forwarder/main/scr
 - 安装常用依赖：`python3`、`curl`、`unzip`、`modemmanager`、`network-manager`、`libqmi-utils`
 - 在 `aarch64 / arm64` 的 eSIM 模式下自动安装内置 `lpac`
 - 安装并启用 Web 管理服务与短信转发服务
-- 输出访问地址、服务状态和 Bark 配置摘要
+- 输出访问地址、服务状态和通知渠道摘要
 
 ### 2. 安装模式
 
@@ -140,7 +140,7 @@ sudo sh ./deploy/install.sh --sim-type physical
 
 ## 使用说明
 
-### Bark 配置
+### 通知渠道配置
 
 实际配置文件路径：
 
@@ -152,12 +152,11 @@ sudo sh ./deploy/install.sh --sim-type physical
 
 ```ini
 MODEM_ID=any
-BARK_BASE_URL=https://your-bark-server
-BARK_DEVICE_KEY=your-device-key
-BARK_GROUP=sms
-BARK_LEVEL=active
+NOTIFICATION_TARGETS_JSON=[{"id":"bark-primary","label":"Bark","url":"barks://bark.example.com/device_key?group=sms&level=active","enabled":true}]
 FORWARD_SMS_STATES=received
 ```
+
+`NOTIFICATION_TARGETS_JSON` 使用 Apprise URL 格式，可以同时配置多个渠道。
 
 ### 服务管理
 
@@ -185,7 +184,7 @@ http://<device-ip>:8080/
 - 查看最近短信
 - 重发最后一条短信
 - 重启基带
-- 修改 Bark 配置
+- 修改通知渠道配置
 - 修改 APN、网络制式和选网策略
 - 在 eSIM 模式下切换 Profile
 

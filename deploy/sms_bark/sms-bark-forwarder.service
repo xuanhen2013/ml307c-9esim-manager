@@ -1,12 +1,12 @@
 [Unit]
-Description=Forward incoming SMS messages to Bark
+Description=Forward incoming SMS messages via Apprise
 After=network-online.target ModemManager.service
 Wants=network-online.target
 
 [Service]
 Type=simple
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/python3 /usr/local/bin/sms_forwarder.py
+ExecStart=/opt/esim-sms-forwarder/venv/bin/python /usr/local/bin/sms_forwarder.py
 Restart=always
 RestartSec=5
 

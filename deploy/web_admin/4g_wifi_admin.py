@@ -5,6 +5,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -14,9 +15,25 @@ from glob import glob
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.error import URLError
-from urllib.parse import quote, unquote, urlencode, urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import unquote, urlparse
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+for candidate in (SCRIPT_DIR, SCRIPT_DIR.parent / "shared"):
+    if (candidate / "notification_utils.py").exists() and str(candidate) not in sys.path:
+        sys.path.insert(0, str(candidate))
+
+from notification_utils import (  # noqa: E402
+    configured_channel_labels,
+    configured_notification_targets,
+    ensure_notification_config,
+    format_channel_label,
+    format_sms_notification,
+    load_notification_targets,
+    normalize_notification_target,
+    save_notification_targets_in_config,
+    send_apprise_notification,
+)
 
 
 HOST = os.environ.get("FOURG_WIFI_ADMIN_HOST", "0.0.0.0")
@@ -396,30 +413,6 @@ def get_latest_sms_detail() -> dict[str, str]:
     }
 
 
-def bark_push(base_url: str, device_key: str, title: str, body: str, group: str, level: str, icon: str = "") -> str:
-    encoded_title = quote(title, safe="")
-    encoded_body = quote(body, safe="")
-    url = f"{base_url.rstrip('/')}/{device_key}/{encoded_title}/{encoded_body}"
-    payload = {"group": group, "level": level}
-    if icon:
-        payload["icon"] = icon
-    request = Request(url, data=urlencode(payload).encode(), method="POST")
-    with urlopen(request, timeout=15) as response:
-        return response.read().decode("utf-8", errors="replace")
-
-
-def format_bark_sms(detail: dict[str, str]) -> tuple[str, str]:
-    number = detail.get("number") or "unknown"
-    title = f"收到短信：{number}"
-    body = "\n\n".join(
-        [
-            detail.get("text") or "(empty)",
-            f"时间：{detail.get('timestamp') or '未知时间'}\n状态：{format_sms_state_label(detail.get('state', ''))}",
-        ]
-    )
-    return title, body
-
-
 def service_state(name: str) -> str:
     result = run_command(["systemctl", "is-active", name], check=False)
     return command_output_text(result) or "unknown"
@@ -440,7 +433,9 @@ def infer_apn_defaults_from_connection(apn: str, username: str = "") -> Optional
 def get_status(refresh_profiles: bool = False) -> dict[str, Any]:
     status_message = ""
     errors: list[str] = []
-    bark = read_env_config(BARK_CONFIG_PATH)
+    notification_config = read_env_config(BARK_CONFIG_PATH)
+    notification_targets = load_notification_targets(notification_config)
+    configured_targets = configured_notification_targets(notification_targets)
     esim_enabled = esim_management_enabled()
     current_sim_type = sim_type()
     connection = get_connection_info()
@@ -512,11 +507,10 @@ def get_status(refresh_profiles: bool = False) -> dict[str, Any]:
             "sms_forwarder": service_state("sms-bark-forwarder.service"),
             "web_admin": service_state("4g-wifi-admin.service"),
         },
-        "bark": {
-            "base_url": bark.get("BARK_BASE_URL", ""),
-            "device_key": bark.get("BARK_DEVICE_KEY", ""),
-            "group": bark.get("BARK_GROUP", "sms"),
-            "level": bark.get("BARK_LEVEL", "active"),
+        "notifications": {
+            "configured_count": len(configured_targets),
+            "configured_labels": configured_channel_labels(configured_targets),
+            "targets": notification_targets,
         },
         "sms": sms_messages,
         "timestamp": format_beijing_timestamp(datetime.now(timezone.utc).isoformat()),
@@ -733,24 +727,37 @@ def switch_profile(ctx: ActionContext, payload: dict[str, Any]) -> None:
     ctx.log(f"{profile_name} 切换完成")
 
 
-def save_bark_config(ctx: ActionContext, payload: dict[str, Any]) -> None:
-    base_url = str(payload.get("base_url", "")).strip()
-    device_key = str(payload.get("device_key", "")).strip()
-    group = str(payload.get("group", "sms")).strip() or "sms"
-    level = str(payload.get("level", "active")).strip() or "active"
-    if not base_url or not device_key:
-        raise ValueError("Bark 地址和 Device Key 不能为空")
+def save_notifications_config(ctx: ActionContext, payload: dict[str, Any]) -> None:
+    raw_targets = payload.get("targets", [])
+    if not isinstance(raw_targets, list):
+        raise ValueError("通知渠道配置格式不正确")
 
-    config = read_env_config(BARK_CONFIG_PATH)
-    config["MODEM_ID"] = config.get("MODEM_ID", "any")
-    config["BARK_BASE_URL"] = base_url
-    config["BARK_DEVICE_KEY"] = device_key
-    config["BARK_GROUP"] = group
-    config["BARK_LEVEL"] = level
-    config["BARK_ICON"] = config.get("BARK_ICON", "")
-    config["FORWARD_SMS_STATES"] = config.get("FORWARD_SMS_STATES", "received")
+    sanitized_targets: list[dict[str, Any]] = []
+    for raw_target in raw_targets:
+        if not isinstance(raw_target, dict):
+            continue
+        label = str(raw_target.get("label", "")).strip()
+        url = str(raw_target.get("url", "")).strip()
+        enabled_raw = raw_target.get("enabled", True)
+        if isinstance(enabled_raw, bool):
+            enabled = enabled_raw
+        else:
+            enabled = str(enabled_raw).strip().lower() not in {"0", "false", "no", "off", ""}
+        if not label and not url:
+            continue
+        if enabled and not url:
+            raise ValueError("启用中的通知渠道必须填写 Apprise URL")
+        sanitized_targets.append(normalize_notification_target(raw_target))
+
+    if not sanitized_targets:
+        raise ValueError("请至少保留一个通知渠道")
+    if not configured_channel_labels(sanitized_targets):
+        raise ValueError("请至少启用一个通知渠道")
+
+    config = ensure_notification_config(read_env_config(BARK_CONFIG_PATH))
+    save_notification_targets_in_config(config, sanitized_targets)
     write_env_config(BARK_CONFIG_PATH, config)
-    ctx.log("Bark 配置已写入")
+    ctx.log(f"通知渠道配置已写入：{'、'.join(configured_channel_labels(sanitized_targets))}")
     run_logged_command(
         ctx,
         ["systemctl", "restart", "sms-bark-forwarder.service"],
@@ -776,30 +783,15 @@ def resend_last_sms(ctx: ActionContext) -> None:
         ctx.log(line)
 
     config = read_env_config(BARK_CONFIG_PATH)
-    base_url = config.get("BARK_BASE_URL", "").strip()
-    device_key = config.get("BARK_DEVICE_KEY", "").strip()
-    if not base_url or not device_key:
-        raise RuntimeError("Bark 配置不完整，无法重发最后一条短信")
+    targets = load_notification_targets(config)
+    labels = configured_channel_labels(targets)
+    if not labels:
+        raise RuntimeError("未配置任何启用的通知渠道，无法重发最后一条短信")
 
-    title, body = format_bark_sms(detail)
-    ctx.log(f"准备推送到 Bark：{base_url.rstrip('/')}/{device_key}")
-    try:
-        response_body = bark_push(
-            base_url,
-            device_key,
-            title,
-            body,
-            config.get("BARK_GROUP", "sms"),
-            config.get("BARK_LEVEL", "active"),
-            config.get("BARK_ICON", ""),
-        )
-    except URLError as exc:
-        raise RuntimeError(f"Bark 推送失败：{exc}") from exc
-
-    if response_body:
-        for line in response_body.splitlines():
-            ctx.log(line)
-    ctx.log("最后一条短信已重新推送到 Bark")
+    title, body = format_sms_notification(detail)
+    ctx.log(f"准备推送到：{'、'.join(labels)}")
+    delivered_labels = send_apprise_notification(targets, title, body)
+    ctx.log(f"最后一条短信已重新推送到：{'、'.join(delivered_labels)}")
 
 
 def apply_radio_mode(ctx: ActionContext, payload: dict[str, Any]) -> None:
@@ -858,8 +850,8 @@ def execute_action(action: str, payload: dict[str, Any], ctx: ActionContext) -> 
     if action == "save_apn":
         apply_apn_settings(ctx, payload)
         return
-    if action == "save_bark":
-        save_bark_config(ctx, payload)
+    if action in {"save_notifications", "save_bark"}:
+        save_notifications_config(ctx, payload)
         return
     if action == "recover_modem":
         recover_modem(ctx)
@@ -1058,7 +1050,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._handle_sync_action("save_apn", data)
                 return
             if path == "/api/bark":
-                self._handle_sync_action("save_bark", data)
+                self._handle_sync_action("save_notifications", data)
+                return
+            if path == "/api/notifications":
+                self._handle_sync_action("save_notifications", data)
                 return
             if path == "/api/modem/recover":
                 self._handle_sync_action("recover_modem", data)

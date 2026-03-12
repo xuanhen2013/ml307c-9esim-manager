@@ -28,7 +28,7 @@ Usage:
 
 Options:
   --sim-type esim      默认模式，启用 eSIM 管理与短信转发
-  --sim-type physical  普通 SIM 模式，禁用 eSIM 管理，只启用短信相关功能
+  --sim-type physical  普通 SIM 模式，只启用短信相关功能
 EOF
 }
 
@@ -48,16 +48,12 @@ download_file() {
     url=$1
     output=$2
     if command -v curl >/dev/null 2>&1; then
-        if curl -fL --retry 2 --connect-timeout 15 --max-time 45 -o "${output}" "${url}"; then
-            return 0
-        fi
-        return 1
+        curl -fL --retry 2 --connect-timeout 15 --max-time 60 -o "${output}" "${url}"
+        return 0
     fi
     if command -v wget >/dev/null 2>&1; then
-        if wget -O "${output}" "${url}"; then
-            return 0
-        fi
-        return 1
+        wget -O "${output}" "${url}"
+        return 0
     fi
     die "缺少 curl 或 wget，无法下载安装包"
 }

@@ -6,12 +6,23 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+for candidate in (SCRIPT_DIR, SCRIPT_DIR.parent / "shared"):
+    if (candidate / "notification_utils.py").exists() and str(candidate) not in sys.path:
+        sys.path.insert(0, str(candidate))
+
+from notification_utils import (  # noqa: E402
+    configured_channel_labels,
+    format_beijing_timestamp,
+    format_sms_notification,
+    load_notification_targets,
+    send_apprise_notification,
+)
 
 
 CONFIG_PATH = Path(os.environ.get("SMS_BARK_CONFIG", "/etc/sms-bark-forwarder.conf"))
@@ -113,34 +124,6 @@ def normalize_sms_text(raw_text: str) -> str:
     return maybe_decode_base64(text)
 
 
-def format_beijing_timestamp(raw_timestamp: str) -> str:
-    if not raw_timestamp:
-        return "未知时间"
-    try:
-        dt = datetime.fromisoformat(raw_timestamp)
-        beijing = timezone(timedelta(hours=8))
-        return dt.astimezone(beijing).strftime("%Y年%m月%d日 %H时%M分%S秒")
-    except Exception:
-        return raw_timestamp
-
-
-def bark_push(base_url: str, device_key: str, title: str, body: str, group: str, level: str, icon: str) -> None:
-    encoded_title = urllib.parse.quote(title, safe="")
-    encoded_body = urllib.parse.quote(body, safe="")
-    url = f"{base_url.rstrip('/')}/{device_key}/{encoded_title}/{encoded_body}"
-    payload = {
-        "group": group,
-        "level": level,
-    }
-    if icon:
-        payload["icon"] = icon
-    data = urllib.parse.urlencode(payload).encode()
-    req = urllib.request.Request(url, data=data, method="POST")
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        response_body = resp.read().decode("utf-8", errors="replace")
-        LOG.info("bark delivered: status=%s body=%s", resp.status, response_body)
-
-
 def fetch_sms_detail(path: str) -> dict[str, str]:
     raw = run_mmcli(["-s", path, "-K"])
     kv = parse_kv(raw)
@@ -151,7 +134,7 @@ def fetch_sms_detail(path: str) -> dict[str, str]:
         "state": kv.get("sms.properties.state", ""),
         "number": kv.get("sms.content.number", ""),
         "text": normalize_sms_text(text or data),
-        "timestamp": kv.get("sms.properties.timestamp", ""),
+        "timestamp": format_beijing_timestamp(kv.get("sms.properties.timestamp", "")),
         "storage": kv.get("sms.properties.storage", ""),
     }
 
@@ -168,40 +151,24 @@ def build_sms_fingerprint(detail: dict[str, str]) -> str:
     return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
 
 
-def format_message(detail: dict[str, str]) -> tuple[str, str]:
-    number = detail["number"] or "unknown"
-    timestamp = format_beijing_timestamp(detail["timestamp"])
-    state_map = {
-        "received": "已接收",
-        "receiving": "接收中",
-        "sent": "已发送",
-        "sending": "发送中",
-        "stored": "已存储",
-    }
-    state = state_map.get(detail["state"], detail["state"] or "unknown")
-    text = detail["text"] or "(empty)"
-    title = f"收到短信：{number}"
-    body = f"{text}\n\n时间：{timestamp}\n状态：{state}"
-    return title, body
-
-
 def main() -> int:
     config = load_env_file(CONFIG_PATH)
     modem_id = config.get("MODEM_ID", "any")
-    bark_base_url = config.get("BARK_BASE_URL", "https://api.day.app")
-    bark_device_key = config.get("BARK_DEVICE_KEY", "")
-    bark_group = config.get("BARK_GROUP", "sms")
-    bark_level = config.get("BARK_LEVEL", "active")
-    bark_icon = config.get("BARK_ICON", "")
+    targets = load_notification_targets(config)
     forward_states = {s.strip() for s in config.get("FORWARD_SMS_STATES", "received").split(",") if s.strip()}
 
-    if not bark_device_key:
-        raise RuntimeError("BARK_DEVICE_KEY is empty in config")
+    if not targets:
+        raise RuntimeError("未配置通知渠道，请先在配置文件或前端页面中保存 Apprise 渠道")
 
     state = ensure_state()
     seen_sms = set(state.get("seen_sms", []))
     seen_fingerprints = set(state.get("seen_fingerprints", []))
-    LOG.info("sms forwarder started, modem=%s poll_interval=%s", modem_id, POLL_INTERVAL)
+    LOG.info(
+        "sms forwarder started, modem=%s poll_interval=%s channels=%s",
+        modem_id,
+        POLL_INTERVAL,
+        ",".join(configured_channel_labels(targets)) or "none",
+    )
 
     while True:
         try:
@@ -214,9 +181,6 @@ def main() -> int:
                 detail = fetch_sms_detail(sms_path)
                 fingerprint = build_sms_fingerprint(detail)
 
-                # Keep the legacy path-based state for migration, but trust the
-                # fingerprint first because SMS object paths can be reused after
-                # modem restarts or SIM/profile switches.
                 if fingerprint in seen_fingerprints:
                     continue
 
@@ -231,16 +195,9 @@ def main() -> int:
                     LOG.info("skip sms %s with state=%s", sms_path, detail["state"])
                     continue
 
-                title, body = format_message(detail)
-                bark_push(
-                    bark_base_url,
-                    bark_device_key,
-                    title,
-                    body,
-                    bark_group,
-                    bark_level,
-                    bark_icon,
-                )
+                title, body = format_sms_notification(detail)
+                labels = send_apprise_notification(targets, title, body)
+                LOG.info("notification delivered via %s", ",".join(labels))
 
             if changed:
                 state["seen_sms"] = sorted(seen_sms)
@@ -248,8 +205,6 @@ def main() -> int:
                 save_state(state)
         except subprocess.CalledProcessError as exc:
             LOG.error("mmcli failed: %s", exc.stderr.strip() if exc.stderr else exc)
-        except urllib.error.URLError as exc:
-            LOG.error("bark push failed: %s", exc)
         except Exception as exc:
             LOG.exception("unexpected failure: %s", exc)
 
