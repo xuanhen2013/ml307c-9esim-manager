@@ -689,7 +689,6 @@ main() {
 
     log "启用服务"
     systemctl enable 4g-wifi-admin.service >/dev/null
-    migrate_legacy_sms_service
     systemctl enable sms-forwarder.service >/dev/null
 
     log "重启管理服务"
