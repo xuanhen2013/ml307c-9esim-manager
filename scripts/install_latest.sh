@@ -48,7 +48,7 @@ download_file() {
     url=$1
     output=$2
     if command -v curl >/dev/null 2>&1; then
-        curl -fL --retry 2 --connect-timeout 15 --max-time 60 -o "${output}" "${url}"
+        curl -fL --retry 2 --connect-timeout 15 --max-time 300 -o "${output}" "${url}"
         return 0
     fi
     if command -v wget >/dev/null 2>&1; then
@@ -141,7 +141,12 @@ main() {
     ensure_extract_dependencies
 
     log "解压安装包"
-    extract_zip "${archive_path}" "${extract_dir}"
+    if ! extract_zip "${archive_path}" "${extract_dir}"; then
+        warn "Release 包解压失败，回退到 main 分支源码包"
+        rm -f "${archive_path}"
+        download_file "${source_url}" "${archive_path}"
+        extract_zip "${archive_path}" "${extract_dir}"
+    fi
 
     if [ -f "${extract_dir}/deploy/install.sh" ]; then
         package_root="${extract_dir}"
