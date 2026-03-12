@@ -385,6 +385,9 @@ const NOTIFICATION_CHANNEL_DEFINITIONS: Record<ChannelKind, NotificationChannelD
 
 const NOTIFICATION_CHANNEL_ORDER: ChannelKind[] = ["bark", "telegram", "gotify", "ntfy", "discord", "custom"]
 
+const DEFAULT_BARK_ICON_URL =
+  "https://raw.githubusercontent.com/cyDione/eSIM-SMS-Forwarder/main/frontend/public/app-icon.png"
+
 const NOTIFICATION_CHANNEL_ALIASES: Record<string, ChannelKind> = {
   bark: "bark",
   barks: "bark",
@@ -457,6 +460,7 @@ function buildNotificationUrl(target: NotificationFormTarget) {
       const query = new URLSearchParams()
       if (values.group?.trim()) query.set("group", values.group.trim())
       if (values.level?.trim()) query.set("level", values.level.trim())
+      query.set("icon", DEFAULT_BARK_ICON_URL)
       const nextPath = [...pathSegments, deviceKey].filter(Boolean).join("/")
       const queryText = query.toString()
       return `${scheme}://${server.host}${nextPath ? `/${nextPath}` : ""}${queryText ? `?${queryText}` : ""}`
