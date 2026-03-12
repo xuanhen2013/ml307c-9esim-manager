@@ -2,13 +2,17 @@
 from __future__ import annotations
 import hashlib
 import json
+import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 
 NOTIFICATION_TARGETS_KEY = "NOTIFICATION_TARGETS_JSON"
 BEIJING_TZ = timezone(timedelta(hours=8))
+SCRIPT_DIR = Path(__file__).resolve().parent
+NOTIFICATION_ICON_ENV_KEY = "ESIM_SMS_FORWARDER_NOTIFICATION_ICON"
 
 CHANNEL_TYPE_LABELS = {
     "bark": "Bark",
@@ -131,6 +135,20 @@ def ensure_notification_config(config: dict[str, str]) -> dict[str, str]:
     return config
 
 
+def resolve_notification_icon_path() -> str | None:
+    raw_override = os.environ.get(NOTIFICATION_ICON_ENV_KEY, "").strip()
+    candidates = [
+        Path(raw_override) if raw_override else None,
+        SCRIPT_DIR / "frontend_dist" / "app-icon.png",
+        SCRIPT_DIR.parent / "web_admin" / "frontend_dist" / "app-icon.png",
+        SCRIPT_DIR.parent.parent / "frontend" / "public" / "app-icon.png",
+    ]
+    for candidate in candidates:
+        if candidate and candidate.is_file():
+            return str(candidate)
+    return None
+
+
 def format_beijing_timestamp(raw_timestamp: str) -> str:
     if not raw_timestamp:
         return "未知时间"
@@ -180,7 +198,12 @@ def send_apprise_notification(targets: list[dict[str, Any]], title: str, body: s
     for target in configured:
         app.add(str(target["url"]))
 
-    result = app.notify(title=title, body=body)
+    notify_kwargs: dict[str, Any] = {"title": title, "body": body}
+    icon_path = resolve_notification_icon_path()
+    if icon_path:
+        notify_kwargs["attach"] = icon_path
+
+    result = app.notify(**notify_kwargs)
     if not result:
         raise RuntimeError("Apprise 推送失败")
     return configured_channel_labels(configured)
