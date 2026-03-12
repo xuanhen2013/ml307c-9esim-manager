@@ -48,14 +48,16 @@ download_file() {
     url=$1
     output=$2
     if command -v curl >/dev/null 2>&1; then
-        curl -fL --retry 2 --connect-timeout 15 --max-time 300 -o "${output}" "${url}"
-        return 0
+        if curl -fL --retry 2 --connect-timeout 15 --max-time 300 -o "${output}" "${url}"; then
+            return 0
+        fi
     fi
     if command -v wget >/dev/null 2>&1; then
-        wget -O "${output}" "${url}"
-        return 0
+        if wget -O "${output}" "${url}"; then
+            return 0
+        fi
     fi
-    die "缺少 curl 或 wget，无法下载安装包"
+    return 1
 }
 
 extract_zip() {
