@@ -64,6 +64,8 @@ type Profile = {
   is_active?: boolean
   iccid_short?: string
   state?: string
+  smsc_address?: string
+  smsc_type?: string
 }
 
 type SmsItem = {
@@ -204,6 +206,7 @@ type ActionName =
   | "restart_sms"
   | "resend_last_sms"
   | "send_test_sms"
+  | "save_profile_smsc"
   | "run_keepalive_task"
   | "save_apn"
   | "save_notifications"
@@ -242,6 +245,11 @@ type ApnFormState = {
   username: string
   password: string
   ip_type: string
+}
+
+type ProfileSmscFormState = {
+  address: string
+  type: string
 }
 
 type KeepaliveFormTask = {
@@ -740,6 +748,18 @@ function createKeepaliveTask(profiles: Profile[]): KeepaliveFormTask {
   }
 }
 
+function buildProfileSmscForms(profiles: Profile[] = []): Record<string, ProfileSmscFormState> {
+  return Object.fromEntries(
+    profiles.map((profile) => [
+      profile.iccid,
+      {
+        address: profile.smsc_address || "",
+        type: profile.smsc_type || "145",
+      },
+    ]),
+  )
+}
+
 function keepaliveRunStateLabel(state: KeepaliveRun["state"]) {
   switch (state) {
     case "queued":
@@ -784,6 +804,8 @@ function friendlyActionName(action: ActionName) {
       return "重发最后一条短信"
     case "send_test_sms":
       return "发送测试短信"
+    case "save_profile_smsc":
+      return "保存短信中心"
     case "run_keepalive_task":
       return "执行保活任务"
     case "save_apn":
@@ -809,6 +831,7 @@ function App() {
   const [newNotificationType, setNewNotificationType] = useState<ChannelKind>("bark")
   const [keepaliveSettings, setKeepaliveSettings] = useState<KeepaliveSettings>({ queue_gap_seconds: 180 })
   const [keepaliveTasks, setKeepaliveTasks] = useState<KeepaliveFormTask[]>([])
+  const [profileSmscForms, setProfileSmscForms] = useState<Record<string, ProfileSmscFormState>>({})
   const [apnForm, setApnForm] = useState<ApnFormState>({
     apn: "",
     username: "",
@@ -822,6 +845,7 @@ function App() {
 
   const notificationsDirtyRef = useRef(false)
   const keepaliveDirtyRef = useRef(false)
+  const profileSmscDirtyRef = useRef(false)
   const apnDirtyRef = useRef(false)
   const networkDirtyRef = useRef(false)
   const radioModeDirtyRef = useRef(false)
@@ -839,6 +863,9 @@ function App() {
       const keepalive = getKeepalive(snapshot)
       setKeepaliveSettings(keepalive.settings)
       setKeepaliveTasks(normalizeKeepaliveTasks(keepalive.tasks))
+    }
+    if (!profileSmscDirtyRef.current) {
+      setProfileSmscForms(buildProfileSmscForms(snapshot.profiles))
     }
     if (!apnDirtyRef.current) {
       setApnForm({
@@ -878,6 +905,7 @@ function App() {
     setSubmittingActionLabel(null)
     notificationsDirtyRef.current = false
     keepaliveDirtyRef.current = false
+    profileSmscDirtyRef.current = false
     apnDirtyRef.current = false
     networkDirtyRef.current = false
     radioModeDirtyRef.current = false
@@ -1137,6 +1165,37 @@ function App() {
     await runAction("send_test_sms", { number, message }, `测试保活短信 ${taskLabel}`)
   }, [runAction])
 
+  const saveProfileSmsc = useCallback(async (profile: Profile, preset?: ProfileSmscFormState) => {
+    const currentValue = preset ?? profileSmscForms[profile.iccid] ?? { address: "", type: "145" }
+    const address = currentValue.address.trim()
+    const type = currentValue.type.trim() || "145"
+    if (!address) {
+      toast.error(`${profile.display_name} 缺少短信中心号码`)
+      return
+    }
+    if (!/^\d{1,3}$/.test(type)) {
+      toast.error(`${profile.display_name} 的短信中心类型必须是数字`)
+      return
+    }
+    profileSmscDirtyRef.current = true
+    if (preset) {
+      setProfileSmscForms((current) => ({
+        ...current,
+        [profile.iccid]: preset,
+      }))
+    }
+    await runAction(
+      "save_profile_smsc",
+      {
+        iccid: profile.iccid,
+        smsc_address: address,
+        smsc_type: type,
+        apply_now: Boolean(profile.is_active),
+      },
+      profile.is_active ? `保存并应用 ${profile.display_name} 的短信中心` : `保存 ${profile.display_name} 的短信中心`,
+    )
+  }, [profileSmscForms, runAction])
+
   useEffect(() => {
     void refreshStatus(true)
     const persistedRaw = window.localStorage.getItem(ACTIVE_ACTION_KEY)
@@ -1362,6 +1421,13 @@ function App() {
                       const isCurrent = Boolean(profile.is_active)
                       const isSwitching =
                         activeAction?.action === "switch_profile" && activeAction.target === profile.iccid
+                      const smscForm = profileSmscForms[profile.iccid] ?? {
+                        address: profile.smsc_address || "",
+                        type: profile.smsc_type || "145",
+                      }
+                      const isGiffgaffProfile = `${profile.display_name} ${profile.provider_name || ""}`
+                        .toLowerCase()
+                        .includes("giffgaff")
                       return (
                         <div
                           key={profile.iccid}
@@ -1412,6 +1478,82 @@ function App() {
                             <div className="grid gap-2 text-sm text-muted-foreground sm:grid-cols-2">
                               <span>ICCID：{profile.iccid || "--"}</span>
                               <span>状态：{profile.state || (isCurrent ? "enabled" : "--")}</span>
+                            </div>
+                            <div className="rounded-2xl border border-border/70 bg-background/70 p-3">
+                              <div className="mb-3 flex flex-col gap-1">
+                                <h4 className="text-sm font-medium text-foreground">短信中心</h4>
+                                <p className="text-sm text-muted-foreground">
+                                  为当前 Profile 绑定 SMSC。切换到这张卡后会自动重新应用；当前使用中的 Profile 可以立即写入基带。
+                                </p>
+                              </div>
+                              <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_8rem]">
+                                <div className="grid gap-2">
+                                  <Label htmlFor={`profile-smsc-address-${profile.iccid}`}>SMSC 号码</Label>
+                                  <Input
+                                    id={`profile-smsc-address-${profile.iccid}`}
+                                    value={smscForm.address}
+                                    onChange={(event) => {
+                                      profileSmscDirtyRef.current = true
+                                      setProfileSmscForms((current) => ({
+                                        ...current,
+                                        [profile.iccid]: {
+                                          ...(current[profile.iccid] ?? { address: "", type: "145" }),
+                                          address: event.target.value,
+                                        },
+                                      }))
+                                    }}
+                                    placeholder={isGiffgaffProfile ? "+447802002606" : "例如 +447802002606"}
+                                  />
+                                </div>
+                                <div className="grid gap-2">
+                                  <Label htmlFor={`profile-smsc-type-${profile.iccid}`}>类型</Label>
+                                  <Input
+                                    id={`profile-smsc-type-${profile.iccid}`}
+                                    value={smscForm.type}
+                                    onChange={(event) => {
+                                      profileSmscDirtyRef.current = true
+                                      setProfileSmscForms((current) => ({
+                                        ...current,
+                                        [profile.iccid]: {
+                                          ...(current[profile.iccid] ?? { address: "", type: "145" }),
+                                          type: event.target.value,
+                                        },
+                                      }))
+                                    }}
+                                    placeholder="145"
+                                  />
+                                </div>
+                              </div>
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={actionBusy}
+                                  onClick={() => {
+                                    void saveProfileSmsc(profile)
+                                  }}
+                                >
+                                  <SendIcon data-icon="inline-start" />
+                                  {isCurrent ? "保存并应用" : "保存关联"}
+                                </Button>
+                                {isGiffgaffProfile ? (
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    disabled={actionBusy}
+                                    onClick={() => {
+                                      void saveProfileSmsc(profile, { address: "+447802002606", type: "145" })
+                                    }}
+                                  >
+                                    套用 giffgaff SMSC
+                                  </Button>
+                                ) : null}
+                              </div>
+                              <p className="mt-3 text-sm text-muted-foreground">
+                                当前保存值：{profile.smsc_address ? `${profile.smsc_address},${profile.smsc_type || "145"}` : "未配置"}
+                              </p>
                             </div>
                           </div>
                         </div>

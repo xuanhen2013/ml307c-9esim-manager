@@ -47,6 +47,7 @@ APP_CONFIG_PATH = Path("/etc/esim-sms-forwarder.conf")
 STATIC_DIR = Path(
     os.environ.get("FOURG_WIFI_ADMIN_STATIC_DIR", str(Path(__file__).resolve().with_name("frontend_dist")))
 )
+PROFILE_SMSC_CONFIG_KEY = "PROFILE_SMSC_CONFIG_JSON"
 BEIJING_TZ = timezone(timedelta(hours=8))
 ACTION_RETENTION_SECONDS = 1800
 ACTION_MAX_EVENTS = 400
@@ -152,7 +153,7 @@ KEEPALIVE_NEXT_ALLOWED_AT = 0.0
 
 
 def run_command(args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, check=check, capture_output=True, text=True)
+    return subprocess.run(args, check=check, capture_output=True, text=True, errors="replace")
 
 
 def command_output_text(result: subprocess.CompletedProcess[str]) -> str:
@@ -829,6 +830,88 @@ def enrich_profile(profile: dict[str, Any]) -> dict[str, Any]:
     return enriched
 
 
+def normalize_smsc_type(raw_value: Any) -> str:
+    text = str(raw_value or "").strip()
+    if not text:
+        return "145"
+    if not re.fullmatch(r"\d{1,3}", text):
+        raise ValueError("SMSC 类型必须是数字")
+    return text
+
+
+def normalize_smsc_address(raw_value: Any) -> str:
+    text = str(raw_value or "").strip()
+    if not text:
+        return ""
+    if not re.fullmatch(r"\+?[0-9]{5,20}", text):
+        raise ValueError("SMSC 地址格式不正确")
+    return text
+
+
+def load_profile_smsc_config() -> dict[str, dict[str, str]]:
+    config = read_env_config(APP_CONFIG_PATH)
+    raw_value = str(config.get(PROFILE_SMSC_CONFIG_KEY, "")).strip()
+    if not raw_value:
+        return {}
+    try:
+        parsed = json.loads(raw_value)
+    except Exception as exc:
+        raise RuntimeError(f"读取 Profile SMSC 配置失败：{exc}") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Profile SMSC 配置格式不正确")
+
+    normalized: dict[str, dict[str, str]] = {}
+    for iccid, item in parsed.items():
+        iccid_text = str(iccid or "").strip()
+        if not iccid_text or not isinstance(item, dict):
+            continue
+        address = normalize_smsc_address(item.get("address", ""))
+        if not address:
+            continue
+        normalized[iccid_text] = {
+            "address": address,
+            "type": normalize_smsc_type(item.get("type", "145")),
+        }
+    return normalized
+
+
+def save_profile_smsc_config(mapping: dict[str, dict[str, str]]) -> None:
+    config = read_env_config(APP_CONFIG_PATH)
+    sanitized: dict[str, dict[str, str]] = {}
+    for iccid, item in mapping.items():
+        iccid_text = str(iccid or "").strip()
+        if not iccid_text:
+            continue
+        address = normalize_smsc_address(item.get("address", ""))
+        if not address:
+            continue
+        sanitized[iccid_text] = {
+            "address": address,
+            "type": normalize_smsc_type(item.get("type", "145")),
+        }
+    if sanitized:
+        config[PROFILE_SMSC_CONFIG_KEY] = json.dumps(sanitized, ensure_ascii=False, separators=(",", ":"))
+    else:
+        config.pop(PROFILE_SMSC_CONFIG_KEY, None)
+    write_env_config(APP_CONFIG_PATH, config)
+
+
+def attach_profile_smsc_config(profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    try:
+        smsc_mapping = load_profile_smsc_config()
+    except Exception:
+        smsc_mapping = {}
+    enriched_profiles: list[dict[str, Any]] = []
+    for profile in profiles:
+        enriched = dict(profile)
+        iccid = str(enriched.get("iccid", "")).strip()
+        smsc_item = smsc_mapping.get(iccid, {})
+        enriched["smsc_address"] = str(smsc_item.get("address", "")).strip()
+        enriched["smsc_type"] = str(smsc_item.get("type", "")).strip()
+        enriched_profiles.append(enriched)
+    return enriched_profiles
+
+
 def get_profiles() -> list[dict[str, Any]]:
     result = run_command(["/usr/local/bin/lpac-switch", "list"])
     payload = parse_lpac_json(result.stdout)
@@ -1158,6 +1241,11 @@ def get_status(refresh_profiles: bool = False) -> dict[str, Any]:
     else:
         profiles = []
 
+    try:
+        profiles = attach_profile_smsc_config(profiles)
+    except Exception as exc:
+        errors.append(str(exc))
+
     modem, modem_error = get_modem_info()
     if modem_error:
         status_message = "基带当前离线或正在重连，稍等片刻后再刷新。"
@@ -1438,6 +1526,13 @@ def switch_profile(ctx: ActionContext, payload: dict[str, Any], *, schedule_gap_
         ctx.log("eSIM Profiles 缓存已更新")
     except Exception as exc:
         ctx.log(f"刷新 eSIM Profiles 缓存失败：{exc}", "warning")
+    try:
+        if apply_profile_smsc_if_configured(ctx, iccid):
+            ctx.log(f"{profile_name} 的短信中心已自动恢复")
+        else:
+            ctx.log(f"{profile_name} 未配置短信中心恢复规则，已跳过")
+    except Exception as exc:
+        raise RuntimeError(f"Profile 切换完成，但应用短信中心失败：{exc}") from exc
     if schedule_gap_after:
         schedule_keepalive_gap()
     ctx.log(f"{profile_name} 切换完成")
@@ -1551,6 +1646,81 @@ def send_test_sms(ctx: ActionContext, payload: dict[str, Any]) -> None:
         success_message="测试短信已发送",
         failure_prefix="发送测试短信失败：",
     )
+
+
+def query_current_smsc(ctx: ActionContext) -> Optional[tuple[str, str]]:
+    result = run_logged_command(
+        ctx,
+        ["mmcli", "-m", "any", "--command=AT+CSCA?"],
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    output = command_output_text(result)
+    match = re.search(r'\+CSCA:\s*"([^"]+)"\s*,\s*(\d+)', output)
+    if not match:
+        return None
+    return match.group(1), match.group(2)
+
+
+def apply_smsc_value(ctx: ActionContext, smsc_address: str, smsc_type: str) -> None:
+    address = normalize_smsc_address(smsc_address)
+    smsc_kind = normalize_smsc_type(smsc_type)
+    ctx.log(f"准备应用短信中心：{address},{smsc_kind}")
+    run_logged_command(
+        ctx,
+        ["mmcli", "-m", "any", f'--command=AT+CSCA="{address}",{smsc_kind}'],
+        success_message="短信中心设置命令已下发",
+        failure_prefix="设置短信中心失败：",
+    )
+    queried = query_current_smsc(ctx)
+    if queried:
+        ctx.log(f"当前短信中心：{queried[0]},{queried[1]}")
+    else:
+        ctx.log("未能回读当前短信中心，可能是基带未返回标准文本", "warning")
+
+
+def apply_profile_smsc_if_configured(ctx: ActionContext, iccid: str) -> bool:
+    smsc_mapping = load_profile_smsc_config()
+    item = smsc_mapping.get(str(iccid or "").strip())
+    if not item:
+        return False
+    apply_smsc_value(ctx, item["address"], item["type"])
+    return True
+
+
+def save_profile_smsc(ctx: ActionContext, payload: dict[str, Any]) -> None:
+    iccid = str(payload.get("iccid", "")).strip()
+    smsc_address = normalize_smsc_address(payload.get("smsc_address", ""))
+    smsc_type = normalize_smsc_type(payload.get("smsc_type", "145"))
+    apply_now = bool(payload.get("apply_now", True))
+    if not iccid:
+        raise ValueError("缺少 ICCID")
+
+    profile = get_profile_by_iccid(iccid)
+    profile_name = str(profile.get("display_name") or profile_display_name(profile)).strip() or iccid
+    smsc_mapping = load_profile_smsc_config()
+    if smsc_address:
+        smsc_mapping[iccid] = {"address": smsc_address, "type": smsc_type}
+    else:
+        smsc_mapping.pop(iccid, None)
+    save_profile_smsc_config(smsc_mapping)
+    if not smsc_address:
+        ctx.log(f"已清除 {profile_name} 的短信中心关联")
+        return
+
+    ctx.log(f"已为 {profile_name} 保存短信中心：{smsc_address},{smsc_type}")
+
+    profiles = refresh_profile_cache(force=True)
+    active_profile = active_profile_from_list(profiles)
+    active_iccid = str(active_profile.get("iccid", "")).strip()
+    if apply_now and active_iccid == iccid:
+        apply_smsc_value(ctx, smsc_address, smsc_type)
+        return
+    if active_iccid == iccid:
+        ctx.log("当前 Profile 正在使用，短信中心已保存，下次切卡后会自动重新应用")
+        return
+    ctx.log("目标 Profile 当前未启用，已保存关联；切换到该 Profile 后会自动应用短信中心")
 
 
 def apply_radio_mode(ctx: ActionContext, payload: dict[str, Any]) -> None:
@@ -1740,6 +1910,9 @@ def execute_action(action: str, payload: dict[str, Any], ctx: ActionContext) -> 
         return
     if action == "send_test_sms":
         send_test_sms(ctx, payload)
+        return
+    if action == "save_profile_smsc":
+        save_profile_smsc(ctx, payload)
         return
     if action == "apply_radio_mode":
         apply_radio_mode(ctx, payload)
