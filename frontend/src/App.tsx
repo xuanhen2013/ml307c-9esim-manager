@@ -138,9 +138,8 @@ type KeepaliveTask = {
   profile_name: string
   target_number: string
   message: string
-  time: string
-  days_of_week: string[]
-  days_label: string
+  cron_expression: string
+  schedule_label: string
   next_run: string
   next_run_label: string
 }
@@ -251,8 +250,7 @@ type KeepaliveFormTask = {
   profile_iccid: string
   target_number: string
   message: string
-  time: string
-  days_of_week: string[]
+  cron_expression: string
 }
 
 const ACTIVE_ACTION_KEY = "ess-active-action"
@@ -269,15 +267,6 @@ const EMPTY_KEEPALIVE = {
   recent_runs: [],
   next_allowed_at: "",
 } satisfies NonNullable<StatusData["keepalive"]>
-const KEEPALIVE_WEEKDAYS = [
-  { value: "mon", label: "周一" },
-  { value: "tue", label: "周二" },
-  { value: "wed", label: "周三" },
-  { value: "thu", label: "周四" },
-  { value: "fri", label: "周五" },
-  { value: "sat", label: "周六" },
-  { value: "sun", label: "周日" },
-] as const
 
 async function requestJson<T>(input: string, init?: RequestInit): Promise<T> {
   const response = await fetch(input, {
@@ -731,8 +720,7 @@ function normalizeKeepaliveTasks(tasks: KeepaliveTask[] = []): KeepaliveFormTask
     profile_iccid: task.profile_iccid,
     target_number: task.target_number,
     message: task.message,
-    time: task.time,
-    days_of_week: [...task.days_of_week],
+    cron_expression: task.cron_expression,
   }))
 }
 
@@ -747,8 +735,7 @@ function createKeepaliveTask(profiles: Profile[]): KeepaliveFormTask {
     profile_iccid: fallbackProfile?.iccid ?? "",
     target_number: "",
     message: "KEEPALIVE",
-    time: "09:00",
-    days_of_week: KEEPALIVE_WEEKDAYS.map((item) => item.value),
+    cron_expression: "0 9 * * *",
   }
 }
 
@@ -1074,11 +1061,8 @@ function App() {
         if (!task.message.trim()) {
           throw new Error(`保活任务 ${task.label} 缺少短信内容`)
         }
-        if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(task.time.trim())) {
-          throw new Error(`保活任务 ${task.label} 的时间格式不正确`)
-        }
-        if (!task.days_of_week.length) {
-          throw new Error(`保活任务 ${task.label} 至少需要选择一个执行日`)
+        if (task.cron_expression.trim().split(/\s+/).length !== 5) {
+          throw new Error(`保活任务 ${task.label} 的 cron 表达式必须是 5 段`)
         }
         return {
           id: task.id,
@@ -1087,8 +1071,7 @@ function App() {
           profile_iccid: task.profile_iccid.trim(),
           target_number: task.target_number.trim(),
           message: task.message,
-          time: task.time.trim(),
-          days_of_week: task.days_of_week,
+          cron_expression: task.cron_expression.trim(),
         }
       })
 
@@ -1845,6 +1828,7 @@ function App() {
                                       <div className="flex flex-wrap items-center gap-2">
                                         <Badge variant="outline">{savedTask?.profile_name || "待选择 Profile"}</Badge>
                                         <Badge variant="secondary">{task.enabled ? "已启用" : "已停用"}</Badge>
+                                        <Badge variant="outline">{savedTask?.schedule_label || task.cron_expression || "--"}</Badge>
                                         {savedTask?.next_run_label ? (
                                           <Badge variant="outline">{savedTask.next_run_label}</Badge>
                                         ) : null}
@@ -1916,7 +1900,7 @@ function App() {
                                         placeholder="例如 EE 保活"
                                       />
                                     </div>
-                                    <div className="grid gap-2">
+                                    <div className="grid gap-2 md:col-span-2">
                                       <Label>目标 Profile</Label>
                                       <Select
                                         value={task.profile_iccid}
@@ -1944,21 +1928,24 @@ function App() {
                                         </SelectContent>
                                       </Select>
                                     </div>
-                                    <div className="grid gap-2">
-                                      <Label htmlFor={`keepalive-time-${task.id}`}>执行时间</Label>
+                                    <div className="grid gap-2 md:col-span-2">
+                                      <Label htmlFor={`keepalive-cron-${task.id}`}>cron 表达式</Label>
                                       <Input
-                                        id={`keepalive-time-${task.id}`}
-                                        type="time"
-                                        value={task.time}
+                                        id={`keepalive-cron-${task.id}`}
+                                        value={task.cron_expression}
                                         onChange={(event) => {
                                           keepaliveDirtyRef.current = true
                                           setKeepaliveTasks((current) =>
                                             current.map((item) =>
-                                              item.id === task.id ? { ...item, time: event.target.value } : item,
+                                              item.id === task.id ? { ...item, cron_expression: event.target.value } : item,
                                             ),
                                           )
                                         }}
+                                        placeholder="例如 0 9 1 * *"
                                       />
+                                      <p className="text-sm text-muted-foreground">
+                                        采用 5 段 cron：分钟 小时 日 月 星期。示例：`0 9 * * *` 表示每天 09:00，`0 9 1 * *` 表示每月 1 日 09:00。
+                                      </p>
                                     </div>
                                     <div className="grid gap-2">
                                       <Label htmlFor={`keepalive-number-${task.id}`}>短信目标号码</Label>
@@ -1975,37 +1962,6 @@ function App() {
                                         }}
                                         placeholder="例如 +447000000000"
                                       />
-                                    </div>
-                                  </div>
-
-                                  <div className="grid gap-2">
-                                    <Label>执行日</Label>
-                                    <div className="flex flex-wrap gap-2">
-                                      {KEEPALIVE_WEEKDAYS.map((weekday) => {
-                                        const selected = task.days_of_week.includes(weekday.value)
-                                        return (
-                                          <Button
-                                            key={`${task.id}-${weekday.value}`}
-                                            type="button"
-                                            size="sm"
-                                            variant={selected ? "default" : "outline"}
-                                            onClick={() => {
-                                              keepaliveDirtyRef.current = true
-                                              setKeepaliveTasks((current) =>
-                                                current.map((item) => {
-                                                  if (item.id !== task.id) return item
-                                                  const nextDays = item.days_of_week.includes(weekday.value)
-                                                    ? item.days_of_week.filter((day) => day !== weekday.value)
-                                                    : [...item.days_of_week, weekday.value]
-                                                  return { ...item, days_of_week: nextDays }
-                                                }),
-                                              )
-                                            }}
-                                          >
-                                            {weekday.label}
-                                          </Button>
-                                        )
-                                      })}
                                     </div>
                                   </div>
 
@@ -2033,7 +1989,7 @@ function App() {
                         ) : (
                           <div className="flex min-h-48 flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-border/70 bg-white/80 px-6 text-center">
                             <p className="max-w-md text-sm text-muted-foreground">
-                              当前还没有保活任务。添加任务后即可按星期和时间自动切卡、发短信、通知并回切。
+                              当前还没有保活任务。添加任务后即可按 cron 表达式自动切卡、发短信、通知并回切。
                             </p>
                           </div>
                         )}

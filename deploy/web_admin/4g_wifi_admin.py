@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 from collections import deque
+from functools import lru_cache
 import json
 import mimetypes
 import os
@@ -69,6 +70,29 @@ WEEKDAY_LABELS = {
     "fri": "周五",
     "sat": "周六",
     "sun": "周日",
+}
+MONTH_ALIASES = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
+CRON_WEEKDAY_ALIASES = {
+    "sun": 0,
+    "mon": 1,
+    "tue": 2,
+    "wed": 3,
+    "thu": 4,
+    "fri": 5,
+    "sat": 6,
 }
 PROFILE_APN_DEFAULTS = {
     "giffgaff": {"apn": "giffgaff.com", "username": "giffgaff", "password": "password", "ip_type": "ipv4"},
@@ -316,6 +340,14 @@ def normalize_weekdays(raw_value: Any) -> list[str]:
     return normalized
 
 
+def legacy_keepalive_cron(time_text: str, days_of_week: list[str]) -> str:
+    hour_text, minute_text = parse_keepalive_time(time_text).split(":", 1)
+    day_numbers = [str(CRON_WEEKDAY_ALIASES[day]) for day in days_of_week if day in CRON_WEEKDAY_ALIASES]
+    if not day_numbers:
+        raise ValueError("旧保活任务缺少执行日，无法转换为 cron 表达式")
+    return f"{int(minute_text)} {int(hour_text)} * * {','.join(day_numbers)}"
+
+
 def normalize_keepalive_settings(raw_value: Any) -> dict[str, int]:
     raw = raw_value if isinstance(raw_value, dict) else {}
     try:
@@ -333,6 +365,147 @@ def parse_keepalive_time(raw_value: Any) -> str:
     return value
 
 
+def parse_cron_value(token: str, minimum: int, maximum: int, aliases: Optional[dict[str, int]] = None) -> int:
+    normalized = token.strip().lower()
+    if aliases and normalized in aliases:
+        value = aliases[normalized]
+    else:
+        value = int(normalized)
+    if maximum == 6 and value == 7:
+        value = 0
+    if value < minimum or value > maximum:
+        raise ValueError
+    return value
+
+
+def parse_cron_field(
+    field_name: str,
+    raw_field: str,
+    minimum: int,
+    maximum: int,
+    aliases: Optional[dict[str, int]] = None,
+) -> tuple[frozenset[int], bool]:
+    field = raw_field.strip().lower()
+    if not field:
+        raise ValueError(f"cron 的 {field_name} 字段为空")
+    is_any = field == "*"
+    values: set[int] = set()
+
+    for segment in field.split(","):
+        item = segment.strip()
+        if not item:
+            raise ValueError(f"cron 的 {field_name} 字段包含空片段")
+
+        step = 1
+        if "/" in item:
+            base, step_text = item.split("/", 1)
+            try:
+                step = int(step_text)
+            except Exception as exc:
+                raise ValueError(f"cron 的 {field_name} 步长不正确") from exc
+            if step <= 0:
+                raise ValueError(f"cron 的 {field_name} 步长必须大于 0")
+        else:
+            base = item
+
+        if base == "*":
+            start = minimum
+            end = maximum
+        elif "-" in base:
+            left, right = base.split("-", 1)
+            try:
+                start = parse_cron_value(left, minimum, maximum, aliases)
+                end = parse_cron_value(right, minimum, maximum, aliases)
+            except Exception as exc:
+                raise ValueError(f"cron 的 {field_name} 范围不正确") from exc
+            if start > end:
+                raise ValueError(f"cron 的 {field_name} 范围起止顺序不正确")
+        else:
+            try:
+                start = parse_cron_value(base, minimum, maximum, aliases)
+            except Exception as exc:
+                raise ValueError(f"cron 的 {field_name} 值不正确") from exc
+            end = start
+
+        for value in range(start, end + 1, step):
+            if maximum == 6 and value == 7:
+                values.add(0)
+            else:
+                values.add(value)
+
+    if not values:
+        raise ValueError(f"cron 的 {field_name} 字段未解析出任何值")
+    return frozenset(values), is_any
+
+
+@lru_cache(maxsize=256)
+def parse_cron_expression(raw_expression: str) -> dict[str, Any]:
+    expression = str(raw_expression or "").strip().lower()
+    parts = expression.split()
+    if len(parts) != 5:
+        raise ValueError("cron 表达式必须是 5 段：分钟 小时 日 月 星期")
+
+    minute_values, minute_any = parse_cron_field("分钟", parts[0], 0, 59)
+    hour_values, hour_any = parse_cron_field("小时", parts[1], 0, 23)
+    day_values, day_any = parse_cron_field("日期", parts[2], 1, 31)
+    month_values, month_any = parse_cron_field("月份", parts[3], 1, 12, MONTH_ALIASES)
+    weekday_values, weekday_any = parse_cron_field("星期", parts[4], 0, 6, CRON_WEEKDAY_ALIASES)
+
+    return {
+        "expression": expression,
+        "minutes": minute_values,
+        "hours": hour_values,
+        "days": day_values,
+        "months": month_values,
+        "weekdays": weekday_values,
+        "minute_any": minute_any,
+        "hour_any": hour_any,
+        "day_any": day_any,
+        "month_any": month_any,
+        "weekday_any": weekday_any,
+    }
+
+
+def normalize_cron_expression(raw_value: Any) -> str:
+    expression = str(raw_value or "").strip().lower()
+    parse_cron_expression(expression)
+    return expression
+
+
+def cron_weekday_value(dt: datetime) -> int:
+    return (dt.weekday() + 1) % 7
+
+
+def cron_day_matches(schedule: dict[str, Any], dt: datetime) -> bool:
+    day_match = dt.day in schedule["days"]
+    weekday_match = cron_weekday_value(dt) in schedule["weekdays"]
+    if schedule["day_any"] and schedule["weekday_any"]:
+        return True
+    if schedule["day_any"]:
+        return weekday_match
+    if schedule["weekday_any"]:
+        return day_match
+    return day_match or weekday_match
+
+
+def cron_matches_datetime(raw_expression: str, dt: datetime) -> bool:
+    schedule = parse_cron_expression(raw_expression)
+    if dt.month not in schedule["months"]:
+        return False
+    if not cron_day_matches(schedule, dt):
+        return False
+    if dt.hour not in schedule["hours"]:
+        return False
+    return dt.minute in schedule["minutes"]
+
+
+def next_allowed_value(sorted_values: list[int], current_value: int) -> Optional[int]:
+    for value in sorted_values:
+        if value >= current_value:
+            return value
+    return None
+
+
 def parse_keepalive_task(raw_task: dict[str, Any]) -> dict[str, Any]:
     task_id = str(raw_task.get("id", "")).strip() or uuid.uuid4().hex[:12]
     label = str(raw_task.get("label", "")).strip()
@@ -344,7 +517,10 @@ def parse_keepalive_task(raw_task: dict[str, Any]) -> dict[str, Any]:
         enabled = enabled_raw
     else:
         enabled = str(enabled_raw).strip().lower() not in {"0", "false", "no", "off", ""}
-    weekdays = normalize_weekdays(raw_task.get("days_of_week", []))
+    cron_expression = str(raw_task.get("cron_expression", "")).strip().lower()
+    if not cron_expression:
+        weekdays = normalize_weekdays(raw_task.get("days_of_week", []))
+        cron_expression = legacy_keepalive_cron(raw_task.get("time", ""), weekdays)
     if not label:
         raise ValueError("保活任务名称不能为空")
     if not profile_iccid:
@@ -353,8 +529,6 @@ def parse_keepalive_task(raw_task: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"保活任务 {label} 缺少目标手机号")
     if not message:
         raise ValueError(f"保活任务 {label} 缺少短信内容")
-    if not weekdays:
-        raise ValueError(f"保活任务 {label} 至少需要选择一个执行日")
     return {
         "id": task_id,
         "label": label,
@@ -362,8 +536,7 @@ def parse_keepalive_task(raw_task: dict[str, Any]) -> dict[str, Any]:
         "profile_iccid": profile_iccid,
         "target_number": target_number,
         "message": message,
-        "time": parse_keepalive_time(raw_task.get("time", "")),
-        "days_of_week": weekdays,
+        "cron_expression": normalize_cron_expression(cron_expression),
     }
 
 
@@ -408,40 +581,79 @@ def save_keepalive_config(settings: dict[str, Any], tasks: list[dict[str, Any]])
     return normalized_settings, normalized_tasks
 
 
-def keepalive_time_parts(task: dict[str, Any]) -> tuple[int, int]:
-    hour_text, minute_text = str(task.get("time", "00:00")).split(":", 1)
-    return int(hour_text), int(minute_text)
-
-
-def keepalive_days_label(days_of_week: list[str]) -> str:
-    labels = [WEEKDAY_LABELS[day] for day in days_of_week if day in WEEKDAY_LABELS]
-    return "、".join(labels)
-
-
 def next_keepalive_run(task: dict[str, Any], now: Optional[datetime] = None) -> Optional[datetime]:
-    current = (now or datetime.now(BEIJING_TZ)).astimezone(BEIJING_TZ)
-    hour, minute = keepalive_time_parts(task)
-    for day_offset in range(0, 8):
-        candidate_date = current + timedelta(days=day_offset)
-        weekday = WEEKDAY_ORDER[candidate_date.weekday()]
-        if weekday not in task.get("days_of_week", []):
+    current = ((now or datetime.now(BEIJING_TZ)).astimezone(BEIJING_TZ) + timedelta(minutes=1)).replace(
+        second=0,
+        microsecond=0,
+    )
+    schedule = parse_cron_expression(task["cron_expression"])
+    sorted_minutes = sorted(schedule["minutes"])
+    sorted_hours = sorted(schedule["hours"])
+    sorted_months = sorted(schedule["months"])
+
+    for _ in range(0, 200000):
+        if current.month not in schedule["months"]:
+            next_month = next_allowed_value(sorted_months, current.month + 1)
+            next_year = current.year
+            if next_month is None:
+                next_month = sorted_months[0]
+                next_year += 1
+            current = current.replace(
+                year=next_year,
+                month=next_month,
+                day=1,
+                hour=sorted_hours[0],
+                minute=sorted_minutes[0],
+                second=0,
+                microsecond=0,
+            )
             continue
-        candidate = candidate_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if candidate <= current:
+
+        if not cron_day_matches(schedule, current):
+            current = (current + timedelta(days=1)).replace(
+                hour=sorted_hours[0],
+                minute=sorted_minutes[0],
+                second=0,
+                microsecond=0,
+            )
             continue
-        return candidate
+
+        if current.hour not in schedule["hours"]:
+            next_hour = next_allowed_value(sorted_hours, current.hour)
+            if next_hour is None:
+                current = (current + timedelta(days=1)).replace(
+                    hour=sorted_hours[0],
+                    minute=sorted_minutes[0],
+                    second=0,
+                    microsecond=0,
+                )
+            else:
+                current = current.replace(hour=next_hour, minute=sorted_minutes[0], second=0, microsecond=0)
+            continue
+
+        if current.minute not in schedule["minutes"]:
+            next_minute = next_allowed_value(sorted_minutes, current.minute)
+            if next_minute is None:
+                current = (current + timedelta(hours=1)).replace(
+                    minute=sorted_minutes[0],
+                    second=0,
+                    microsecond=0,
+                )
+            else:
+                current = current.replace(minute=next_minute, second=0, microsecond=0)
+            continue
+
+        if cron_matches_datetime(task["cron_expression"], current):
+            return current
+        current += timedelta(minutes=1)
     return None
 
 
 def due_keepalive_run(task: dict[str, Any], now: Optional[datetime] = None) -> Optional[datetime]:
     current = (now or datetime.now(BEIJING_TZ)).astimezone(BEIJING_TZ)
-    weekday = WEEKDAY_ORDER[current.weekday()]
-    if weekday not in task.get("days_of_week", []):
-        return None
-    hour, minute = keepalive_time_parts(task)
-    scheduled = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    scheduled = current.replace(second=0, microsecond=0)
     delta_seconds = (current - scheduled).total_seconds()
-    if 0 <= delta_seconds <= KEEPALIVE_SCHEDULE_GRACE_SECONDS:
+    if 0 <= delta_seconds <= KEEPALIVE_SCHEDULE_GRACE_SECONDS and cron_matches_datetime(task["cron_expression"], scheduled):
         return scheduled
     return None
 
@@ -505,7 +717,7 @@ def keepalive_status_snapshot(profiles: list[dict[str, Any]]) -> dict[str, Any]:
                     if profile
                     else profile_name_for_iccid(task["profile_iccid"], profiles)
                 ),
-                "days_label": keepalive_days_label(task["days_of_week"]),
+                "schedule_label": task["cron_expression"],
                 "next_run": next_run.isoformat() if next_run else "",
                 "next_run_label": format_beijing_timestamp(next_run.isoformat()) if next_run else "",
             }

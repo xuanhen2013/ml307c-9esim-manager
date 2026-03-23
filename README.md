@@ -19,7 +19,7 @@
 - 读取 eUICC 内置 Profiles
 - 一键切换当前启用的 eSIM Profile
 - 切卡后自动执行基带恢复，帮助重新注册网络
-- 支持按星期和时间执行保活任务，自动切换指定 Profile、发送短信并回切原 Profile
+- 支持按 cron 表达式执行保活任务，自动切换指定 Profile、发送短信并回切原 Profile
 - Web 页面显示执行进度和 Shell 日志
 
 ### 短信转发
