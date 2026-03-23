@@ -290,19 +290,44 @@ show_dependency_warnings() {
     fi
 }
 
+merge_env_config_value() {
+    config_path=$1
+    config_key=$2
+    config_value=$3
+
+    python3 - "$config_path" "$config_key" "$config_value" <<'PY'
+import sys
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+config_key = sys.argv[2]
+config_value = sys.argv[3]
+
+config = {}
+if config_path.exists():
+    for raw_line in config_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        config[key.strip()] = value.strip().strip("\"'")
+
+config[config_key] = config_value
+lines = [f"{key}={value}" for key, value in config.items()]
+config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+}
+
 write_app_config() {
     esim_enabled=1
     if [ "${SIM_TYPE}" = "physical" ]; then
         esim_enabled=0
     fi
 
-    cat > "${APP_CONFIG_DST}" <<EOF
-SIM_TYPE=${SIM_TYPE}
-ESIM_MANAGEMENT_ENABLED=${esim_enabled}
-EOF
-
+    merge_env_config_value "${APP_CONFIG_DST}" "SIM_TYPE" "${SIM_TYPE}"
+    merge_env_config_value "${APP_CONFIG_DST}" "ESIM_MANAGEMENT_ENABLED" "${esim_enabled}"
     chmod 644 "${APP_CONFIG_DST}"
-    log "已写入安装模式配置: ${APP_CONFIG_DST}"
+    log "已更新安装模式配置并保留现有业务设置: ${APP_CONFIG_DST}"
 }
 
 service_status() {
