@@ -48,12 +48,12 @@ download_file() {
     url=$1
     output=$2
     if command -v curl >/dev/null 2>&1; then
-        if curl -fL --retry 2 --connect-timeout 15 --max-time 300 -o "${output}" "${url}"; then
+        if curl --http1.1 -fL --retry 2 --connect-timeout 15 --max-time 300 -o "${output}" "${url}"; then
             return 0
         fi
     fi
     if command -v wget >/dev/null 2>&1; then
-        if wget -O "${output}" "${url}"; then
+        if wget --tries=2 --timeout=60 --max-redirect=20 -O "${output}" "${url}"; then
             return 0
         fi
     fi
