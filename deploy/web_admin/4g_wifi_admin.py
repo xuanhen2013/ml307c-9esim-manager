@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+from collections import deque
 import json
 import mimetypes
 import os
@@ -48,6 +49,27 @@ STATIC_DIR = Path(
 BEIJING_TZ = timezone(timedelta(hours=8))
 ACTION_RETENTION_SECONDS = 1800
 ACTION_MAX_EVENTS = 400
+KEEPALIVE_TASKS_KEY = "KEEPALIVE_TASKS_JSON"
+KEEPALIVE_SETTINGS_KEY = "KEEPALIVE_SETTINGS_JSON"
+KEEPALIVE_ACTION_NAME = "run_keepalive_task"
+KEEPALIVE_SCHEDULER_INTERVAL_SECONDS = 15
+KEEPALIVE_SCHEDULE_GRACE_SECONDS = 75
+KEEPALIVE_SWITCH_SETTLE_SECONDS = 20
+KEEPALIVE_NETWORK_WAIT_SECONDS = 120
+KEEPALIVE_NETWORK_POLL_SECONDS = 10
+KEEPALIVE_RETRY_INTERVAL_SECONDS = 30
+KEEPALIVE_MAX_SEND_ATTEMPTS = 3
+KEEPALIVE_HISTORY_LIMIT = 10
+WEEKDAY_ORDER = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+WEEKDAY_LABELS = {
+    "mon": "周一",
+    "tue": "周二",
+    "wed": "周三",
+    "thu": "周四",
+    "fri": "周五",
+    "sat": "周六",
+    "sun": "周日",
+}
 PROFILE_APN_DEFAULTS = {
     "giffgaff": {"apn": "giffgaff.com", "username": "giffgaff", "password": "password", "ip_type": "ipv4"},
     "t-mobile": {"apn": "fast.t-mobile.com", "username": "", "password": "", "ip_type": "ipv4v6"},
@@ -94,10 +116,15 @@ FALLBACK_INDEX_HTML = """<!doctype html>
 
 ACTIONS: dict[str, dict[str, Any]] = {}
 ACTIONS_LOCK = threading.Lock()
+ACTION_QUEUE: deque[str] = deque()
+ACTION_QUEUE_CONDITION = threading.Condition()
 PROFILE_CACHE: list[dict[str, Any]] = []
 PROFILE_CACHE_ERROR = ""
 PROFILE_CACHE_UPDATED_AT = 0.0
 PROFILE_CACHE_LOCK = threading.Lock()
+KEEPALIVE_RUNTIME_LOCK = threading.Lock()
+KEEPALIVE_LAST_ENQUEUED: dict[str, str] = {}
+KEEPALIVE_NEXT_ALLOWED_AT = 0.0
 
 
 def run_command(args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -246,6 +273,297 @@ def esim_management_enabled() -> bool:
 
 def sim_type() -> str:
     return str(app_runtime_config().get("SIM_TYPE", "esim")).strip().lower() or "esim"
+
+
+def parse_iso_datetime(raw_value: str) -> Optional[datetime]:
+    if not raw_value:
+        return None
+    try:
+        normalized = raw_value.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=BEIJING_TZ)
+        return parsed.astimezone(BEIJING_TZ)
+    except Exception:
+        return None
+
+
+def format_runtime_timestamp(raw_timestamp: float) -> str:
+    if raw_timestamp <= 0:
+        return ""
+    return datetime.fromtimestamp(raw_timestamp, tz=BEIJING_TZ).strftime("%Y年%m月%d日 %H时%M分%S秒")
+
+
+def parse_signal_value(raw_value: str) -> int:
+    try:
+        return max(0, int(str(raw_value).strip()))
+    except Exception:
+        return 0
+
+
+def normalize_weekdays(raw_value: Any) -> list[str]:
+    if isinstance(raw_value, str):
+        values = [item.strip().lower() for item in raw_value.split(",")]
+    elif isinstance(raw_value, list):
+        values = [str(item).strip().lower() for item in raw_value]
+    else:
+        values = []
+    normalized: list[str] = []
+    for value in values:
+        if value in WEEKDAY_ORDER and value not in normalized:
+            normalized.append(value)
+    normalized.sort(key=WEEKDAY_ORDER.index)
+    return normalized
+
+
+def normalize_keepalive_settings(raw_value: Any) -> dict[str, int]:
+    raw = raw_value if isinstance(raw_value, dict) else {}
+    try:
+        queue_gap_seconds = int(raw.get("queue_gap_seconds", 180))
+    except Exception:
+        queue_gap_seconds = 180
+    queue_gap_seconds = max(30, min(queue_gap_seconds, 1800))
+    return {"queue_gap_seconds": queue_gap_seconds}
+
+
+def parse_keepalive_time(raw_value: Any) -> str:
+    value = str(raw_value or "").strip()
+    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+        raise ValueError("保活时间格式必须是 HH:MM")
+    return value
+
+
+def parse_keepalive_task(raw_task: dict[str, Any]) -> dict[str, Any]:
+    task_id = str(raw_task.get("id", "")).strip() or uuid.uuid4().hex[:12]
+    label = str(raw_task.get("label", "")).strip()
+    profile_iccid = str(raw_task.get("profile_iccid", "")).strip()
+    target_number = str(raw_task.get("target_number", "")).strip()
+    message = str(raw_task.get("message", "")).strip()
+    enabled_raw = raw_task.get("enabled", True)
+    if isinstance(enabled_raw, bool):
+        enabled = enabled_raw
+    else:
+        enabled = str(enabled_raw).strip().lower() not in {"0", "false", "no", "off", ""}
+    weekdays = normalize_weekdays(raw_task.get("days_of_week", []))
+    if not label:
+        raise ValueError("保活任务名称不能为空")
+    if not profile_iccid:
+        raise ValueError(f"保活任务 {label} 缺少 Profile")
+    if not target_number:
+        raise ValueError(f"保活任务 {label} 缺少目标手机号")
+    if not message:
+        raise ValueError(f"保活任务 {label} 缺少短信内容")
+    if not weekdays:
+        raise ValueError(f"保活任务 {label} 至少需要选择一个执行日")
+    return {
+        "id": task_id,
+        "label": label,
+        "enabled": enabled,
+        "profile_iccid": profile_iccid,
+        "target_number": target_number,
+        "message": message,
+        "time": parse_keepalive_time(raw_task.get("time", "")),
+        "days_of_week": weekdays,
+    }
+
+
+def load_keepalive_config() -> tuple[dict[str, int], list[dict[str, Any]]]:
+    config = read_env_config(APP_CONFIG_PATH)
+    raw_settings = str(config.get(KEEPALIVE_SETTINGS_KEY, "")).strip()
+    raw_tasks = str(config.get(KEEPALIVE_TASKS_KEY, "")).strip()
+
+    try:
+        parsed_settings = json.loads(raw_settings) if raw_settings else {}
+    except json.JSONDecodeError:
+        parsed_settings = {}
+    settings = normalize_keepalive_settings(parsed_settings)
+
+    try:
+        parsed_tasks = json.loads(raw_tasks) if raw_tasks else []
+    except json.JSONDecodeError:
+        parsed_tasks = []
+    if not isinstance(parsed_tasks, list):
+        parsed_tasks = []
+
+    tasks: list[dict[str, Any]] = []
+    for item in parsed_tasks:
+        if not isinstance(item, dict):
+            continue
+        tasks.append(parse_keepalive_task(item))
+    return settings, tasks
+
+
+def save_keepalive_config(settings: dict[str, Any], tasks: list[dict[str, Any]]) -> tuple[dict[str, int], list[dict[str, Any]]]:
+    normalized_settings = normalize_keepalive_settings(settings)
+    normalized_tasks = [parse_keepalive_task(task) for task in tasks]
+    config = read_env_config(APP_CONFIG_PATH)
+    config[KEEPALIVE_SETTINGS_KEY] = json.dumps(normalized_settings, ensure_ascii=False, separators=(",", ":"))
+    config[KEEPALIVE_TASKS_KEY] = json.dumps(normalized_tasks, ensure_ascii=False, separators=(",", ":"))
+    write_env_config(APP_CONFIG_PATH, config)
+    active_task_ids = {task["id"] for task in normalized_tasks}
+    with KEEPALIVE_RUNTIME_LOCK:
+        stale_ids = [task_id for task_id in KEEPALIVE_LAST_ENQUEUED if task_id not in active_task_ids]
+        for task_id in stale_ids:
+            KEEPALIVE_LAST_ENQUEUED.pop(task_id, None)
+    return normalized_settings, normalized_tasks
+
+
+def keepalive_time_parts(task: dict[str, Any]) -> tuple[int, int]:
+    hour_text, minute_text = str(task.get("time", "00:00")).split(":", 1)
+    return int(hour_text), int(minute_text)
+
+
+def keepalive_days_label(days_of_week: list[str]) -> str:
+    labels = [WEEKDAY_LABELS[day] for day in days_of_week if day in WEEKDAY_LABELS]
+    return "、".join(labels)
+
+
+def next_keepalive_run(task: dict[str, Any], now: Optional[datetime] = None) -> Optional[datetime]:
+    current = (now or datetime.now(BEIJING_TZ)).astimezone(BEIJING_TZ)
+    hour, minute = keepalive_time_parts(task)
+    for day_offset in range(0, 8):
+        candidate_date = current + timedelta(days=day_offset)
+        weekday = WEEKDAY_ORDER[candidate_date.weekday()]
+        if weekday not in task.get("days_of_week", []):
+            continue
+        candidate = candidate_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate <= current:
+            continue
+        return candidate
+    return None
+
+
+def due_keepalive_run(task: dict[str, Any], now: Optional[datetime] = None) -> Optional[datetime]:
+    current = (now or datetime.now(BEIJING_TZ)).astimezone(BEIJING_TZ)
+    weekday = WEEKDAY_ORDER[current.weekday()]
+    if weekday not in task.get("days_of_week", []):
+        return None
+    hour, minute = keepalive_time_parts(task)
+    scheduled = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    delta_seconds = (current - scheduled).total_seconds()
+    if 0 <= delta_seconds <= KEEPALIVE_SCHEDULE_GRACE_SECONDS:
+        return scheduled
+    return None
+
+
+def keepalive_schedule_key(scheduled_at: datetime) -> str:
+    return scheduled_at.astimezone(BEIJING_TZ).strftime("%Y%m%d%H%M")
+
+
+def active_profile_from_list(profiles: list[dict[str, Any]]) -> dict[str, Any]:
+    return next((profile for profile in profiles if profile_is_active(profile)), {})
+
+
+def profile_name_for_iccid(iccid: str, profiles: list[dict[str, Any]]) -> str:
+    for profile in profiles:
+        if str(profile.get("iccid", "")).strip() == iccid:
+            return str(profile.get("display_name") or profile_display_name(profile)).strip()
+    return f"Profile {iccid[-6:]}" if len(iccid) >= 6 else iccid or "未知 Profile"
+
+
+def describe_keepalive_record(record: dict[str, Any]) -> dict[str, Any]:
+    metadata = record.get("metadata", {})
+    scheduled_for = str(metadata.get("scheduled_for", "")).strip()
+    created_at = float(record.get("created_at", 0))
+    updated_at = float(record.get("updated_at", 0))
+    last_message = ""
+    events = record.get("events", [])
+    if isinstance(events, list) and events:
+        last_message = str(events[-1].get("message", "")).strip()
+    return {
+        "id": record.get("id", ""),
+        "task_id": metadata.get("task_id", ""),
+        "label": metadata.get("label", "") or "保活任务",
+        "trigger": metadata.get("trigger", "manual"),
+        "scheduled_for": scheduled_for,
+        "scheduled_for_label": format_beijing_timestamp(scheduled_for) if scheduled_for else "",
+        "profile_iccid": metadata.get("profile_iccid", ""),
+        "profile_name": metadata.get("profile_name", ""),
+        "target_number": metadata.get("target_number", ""),
+        "state": record.get("state", ""),
+        "error": record.get("error", ""),
+        "last_message": last_message,
+        "created_at": format_runtime_timestamp(created_at),
+        "updated_at": format_runtime_timestamp(updated_at),
+    }
+
+
+def keepalive_status_snapshot(profiles: list[dict[str, Any]]) -> dict[str, Any]:
+    now = datetime.now(BEIJING_TZ)
+    settings, tasks = load_keepalive_config()
+    profile_map = {str(profile.get("iccid", "")).strip(): profile for profile in profiles}
+
+    task_views: list[dict[str, Any]] = []
+    for task in tasks:
+        next_run = next_keepalive_run(task, now)
+        profile = profile_map.get(task["profile_iccid"], {})
+        task_views.append(
+            {
+                **task,
+                "profile_name": (
+                    str(profile.get("display_name", "")).strip()
+                    if profile
+                    else profile_name_for_iccid(task["profile_iccid"], profiles)
+                ),
+                "days_label": keepalive_days_label(task["days_of_week"]),
+                "next_run": next_run.isoformat() if next_run else "",
+                "next_run_label": format_beijing_timestamp(next_run.isoformat()) if next_run else "",
+            }
+        )
+
+    with ACTIONS_LOCK:
+        keepalive_records = [
+            record
+            for record in ACTIONS.values()
+            if record.get("action") == KEEPALIVE_ACTION_NAME and record.get("metadata", {}).get("kind") == "keepalive"
+        ]
+
+    queue_items: list[dict[str, Any]] = []
+    active_run: Optional[dict[str, Any]] = None
+    history: list[dict[str, Any]] = []
+    for record in sorted(keepalive_records, key=lambda item: float(item.get("created_at", 0)), reverse=True):
+        description = describe_keepalive_record(record)
+        state = str(record.get("state", "")).strip()
+        if state == "running" and active_run is None:
+            active_run = description
+        elif state == "queued":
+            queue_items.append(description)
+        elif state in {"done", "error"} and len(history) < KEEPALIVE_HISTORY_LIMIT:
+            history.append(description)
+
+    with KEEPALIVE_RUNTIME_LOCK:
+        next_allowed_at = KEEPALIVE_NEXT_ALLOWED_AT
+
+    return {
+        "settings": settings,
+        "tasks": task_views,
+        "active_run": active_run,
+        "queued_runs": sorted(queue_items, key=lambda item: item.get("scheduled_for", "")),
+        "recent_runs": history,
+        "next_allowed_at": format_runtime_timestamp(next_allowed_at),
+    }
+
+
+def keepalive_queue_delay_seconds() -> int:
+    settings, _ = load_keepalive_config()
+    return int(settings["queue_gap_seconds"])
+
+
+def schedule_keepalive_gap(seconds: Optional[int] = None) -> None:
+    gap_seconds = seconds if seconds is not None else keepalive_queue_delay_seconds()
+    with KEEPALIVE_RUNTIME_LOCK:
+        global KEEPALIVE_NEXT_ALLOWED_AT
+        KEEPALIVE_NEXT_ALLOWED_AT = max(KEEPALIVE_NEXT_ALLOWED_AT, time.time() + max(0, gap_seconds))
+
+
+def wait_for_keepalive_gap(ctx: "ActionContext", gap_seconds: Optional[int] = None) -> None:
+    expected_gap = gap_seconds if gap_seconds is not None else keepalive_queue_delay_seconds()
+    while True:
+        with KEEPALIVE_RUNTIME_LOCK:
+            remaining = KEEPALIVE_NEXT_ALLOWED_AT - time.time()
+        if remaining <= 0:
+            return
+        ctx.sleep(max(1, int(remaining) + 1), f"等待切卡缓冲时间，避免频繁切卡（配置 {expected_gap} 秒）")
 
 
 def profile_is_active(profile: dict[str, Any]) -> bool:
@@ -432,6 +750,157 @@ def infer_apn_defaults_from_connection(apn: str, username: str = "") -> Optional
     return None
 
 
+def modem_network_ready(modem: dict[str, str]) -> bool:
+    registration = str(modem.get("modem.3gpp.registration-state", "")).strip().lower()
+    state = str(modem.get("modem.generic.state", "")).strip().lower()
+    signal = parse_signal_value(modem.get("modem.generic.signal-quality.value", "0"))
+    return signal > 0 and (
+        registration in {"home", "roaming", "registered"}
+        or state in {"registered", "connected"}
+    )
+
+
+def wait_for_modem_network_ready(
+    ctx: ActionContext,
+    *,
+    timeout_seconds: int = KEEPALIVE_NETWORK_WAIT_SECONDS,
+    poll_seconds: int = KEEPALIVE_NETWORK_POLL_SECONDS,
+) -> tuple[bool, str]:
+    deadline = time.time() + timeout_seconds
+    last_state = ""
+    while time.time() < deadline:
+        modem, modem_error = get_modem_info()
+        if modem_error:
+            current_state = f"error:{modem_error}"
+            if current_state != last_state:
+                ctx.log(f"等待网络注册：{modem_error}", "warning")
+                last_state = current_state
+            time.sleep(poll_seconds)
+            continue
+
+        operator_name = modem.get("modem.3gpp.operator-name", "--")
+        registration = modem.get("modem.3gpp.registration-state", "--")
+        signal = parse_signal_value(modem.get("modem.generic.signal-quality.value", "0"))
+        current_state = f"{operator_name}|{registration}|{signal}"
+        if modem_network_ready(modem):
+            ctx.log(f"网络已可用：{operator_name} / {registration} / 信号 {signal}%")
+            return True, ""
+        if current_state != last_state:
+            ctx.log(f"等待网络注册：{operator_name} / {registration} / 信号 {signal}%")
+            last_state = current_state
+        time.sleep(poll_seconds)
+    return False, f"等待网络可用超时，已等待 {timeout_seconds} 秒"
+
+
+def escape_mmcli_sms_value(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
+def create_sms(ctx: ActionContext, number: str, text: str) -> str:
+    request_arg = (
+        "--messaging-create-sms="
+        f"number={escape_mmcli_sms_value(number)},text={escape_mmcli_sms_value(text)}"
+    )
+    result = run_logged_command(
+        ctx,
+        ["mmcli", "-m", "any", request_arg],
+        failure_prefix="创建短信对象失败：",
+    )
+    match = re.search(r"(/org/freedesktop/ModemManager1/SMS/\d+)", result.stdout or result.stderr or "")
+    if not match:
+        raise RuntimeError("创建短信对象失败：未返回短信路径")
+    sms_path = match.group(1)
+    ctx.log(f"短信对象已创建：{sms_path}")
+    return sms_path
+
+
+def delete_sms(ctx: ActionContext, sms_path: str) -> None:
+    if not sms_path:
+        return
+    run_logged_command(
+        ctx,
+        ["mmcli", "-m", "any", f"--messaging-delete-sms={sms_path}"],
+        check=False,
+    )
+
+
+def send_keepalive_sms(ctx: ActionContext, number: str, text: str) -> None:
+    sms_path = create_sms(ctx, number, text)
+    try:
+        run_logged_command(
+            ctx,
+            ["mmcli", "-s", sms_path, "--send"],
+            failure_prefix="发送保活短信失败：",
+            success_message="保活短信已发送",
+        )
+    finally:
+        delete_sms(ctx, sms_path)
+
+
+def keepalive_notification_payload(
+    task: dict[str, Any],
+    *,
+    profile_name: str,
+    trigger: str,
+    scheduled_for: str,
+    success: bool,
+    attempts: int,
+    detail: str,
+    original_profile_name: str,
+) -> tuple[str, str]:
+    title = f"{'保活成功' if success else '保活失败'}：{task['label']}"
+    lines = [
+        f"任务：{task['label']}",
+        f"触发方式：{'定时' if trigger == 'schedule' else '手动'}",
+        f"目标 Profile：{profile_name}",
+        f"目标号码：{task['target_number']}",
+        f"执行时间：{format_beijing_timestamp(scheduled_for) if scheduled_for else format_beijing_timestamp(datetime.now(timezone.utc).isoformat())}",
+        f"尝试次数：{attempts}",
+        f"结果：{'成功' if success else '失败'}",
+        f"原始 Profile：{original_profile_name or '未知'}",
+    ]
+    if detail:
+        lines.append(f"详情：{detail}")
+    return title, "\n".join(lines)
+
+
+def notify_keepalive_result(
+    ctx: ActionContext,
+    task: dict[str, Any],
+    *,
+    profile_name: str,
+    trigger: str,
+    scheduled_for: str,
+    success: bool,
+    attempts: int,
+    detail: str,
+    original_profile_name: str,
+) -> None:
+    config = read_env_config(NOTIFICATION_CONFIG_PATH)
+    targets = load_notification_targets(config)
+    labels = configured_channel_labels(targets)
+    if not labels:
+        ctx.log("未配置任何启用的通知渠道，已跳过保活结果通知", "warning")
+        return
+    title, body = keepalive_notification_payload(
+        task,
+        profile_name=profile_name,
+        trigger=trigger,
+        scheduled_for=scheduled_for,
+        success=success,
+        attempts=attempts,
+        detail=detail,
+        original_profile_name=original_profile_name,
+    )
+    try:
+        ctx.log(f"准备发送保活结果通知：{'、'.join(labels)}")
+        delivered_labels = send_apprise_notification(targets, title, body)
+        ctx.log(f"保活结果通知已发送到：{'、'.join(delivered_labels)}")
+    except Exception as exc:
+        ctx.log(f"保活结果通知发送失败：{exc}", "warning")
+
+
 def get_status(refresh_profiles: bool = False) -> dict[str, Any]:
     status_message = ""
     errors: list[str] = []
@@ -470,6 +939,19 @@ def get_status(refresh_profiles: bool = False) -> dict[str, Any]:
         if not status_message:
             status_message = "暂时拿不到短信列表，可能是基带还在重新注册。"
         errors.append(sms_error)
+
+    try:
+        keepalive = keepalive_status_snapshot(profiles)
+    except Exception as exc:
+        keepalive = {
+            "settings": normalize_keepalive_settings({}),
+            "tasks": [],
+            "active_run": None,
+            "queued_runs": [],
+            "recent_runs": [],
+            "next_allowed_at": "",
+        }
+        errors.append(f"读取保活配置失败：{exc}")
 
     return {
         "profiles": profiles,
@@ -514,6 +996,7 @@ def get_status(refresh_profiles: bool = False) -> dict[str, Any]:
             "configured_labels": configured_channel_labels(configured_targets),
             "targets": notification_targets,
         },
+        "keepalive": keepalive,
         "sms": sms_messages,
         "timestamp": format_beijing_timestamp(datetime.now(timezone.utc).isoformat()),
     }
@@ -693,7 +1176,7 @@ def apply_apn_settings(ctx: ActionContext, payload: dict[str, Any]) -> None:
     )
 
 
-def switch_profile(ctx: ActionContext, payload: dict[str, Any]) -> None:
+def switch_profile(ctx: ActionContext, payload: dict[str, Any], *, schedule_gap_after: bool = True) -> None:
     if not esim_management_enabled():
         raise RuntimeError("当前为普通 SIM 模式，eSIM 管理功能已禁用")
 
@@ -726,6 +1209,8 @@ def switch_profile(ctx: ActionContext, payload: dict[str, Any]) -> None:
         ctx.log("eSIM Profiles 缓存已更新")
     except Exception as exc:
         ctx.log(f"刷新 eSIM Profiles 缓存失败：{exc}", "warning")
+    if schedule_gap_after:
+        schedule_keepalive_gap()
     ctx.log(f"{profile_name} 切换完成")
 
 
@@ -765,6 +1250,24 @@ def save_notifications_config(ctx: ActionContext, payload: dict[str, Any]) -> No
         ["systemctl", "restart", SMS_FORWARDER_SERVICE],
         check=False,
         success_message="短信转发服务已重启",
+    )
+
+
+def save_keepalive_settings(ctx: ActionContext, payload: dict[str, Any]) -> None:
+    raw_settings = payload.get("settings", {})
+    raw_tasks = payload.get("tasks", [])
+    if raw_settings is None:
+        raw_settings = {}
+    if not isinstance(raw_settings, dict):
+        raise ValueError("保活设置格式不正确")
+    if not isinstance(raw_tasks, list):
+        raise ValueError("保活任务格式不正确")
+
+    normalized_settings, normalized_tasks = save_keepalive_config(raw_settings, raw_tasks)
+    enabled_count = sum(1 for task in normalized_tasks if task["enabled"])
+    ctx.log(
+        f"保活设置已写入：{len(normalized_tasks)} 条任务，"
+        f"启用 {enabled_count} 条，切卡缓冲 {normalized_settings['queue_gap_seconds']} 秒"
     )
 
 
@@ -845,6 +1348,120 @@ def apply_network_selection(ctx: ActionContext, payload: dict[str, Any]) -> None
     )
 
 
+def run_keepalive_task(ctx: ActionContext, payload: dict[str, Any]) -> None:
+    if not esim_management_enabled():
+        raise RuntimeError("当前为普通 SIM 模式，无法执行保活任务")
+
+    task_id = str(payload.get("task_id", "")).strip()
+    if not task_id:
+        raise ValueError("缺少保活任务 ID")
+
+    settings, tasks = load_keepalive_config()
+    task = next((item for item in tasks if item["id"] == task_id), None)
+    if not task:
+        raise RuntimeError("保活任务不存在或已删除")
+
+    trigger = str(payload.get("trigger", "manual")).strip() or "manual"
+    scheduled_for = str(payload.get("scheduled_for", "")).strip()
+
+    profiles = refresh_profile_cache(force=True)
+    target_profile_name = profile_name_for_iccid(task["profile_iccid"], profiles)
+    active_profile = active_profile_from_list(profiles)
+    original_profile_iccid = str(active_profile.get("iccid", "")).strip()
+    original_profile_name = (
+        str(active_profile.get("display_name") or profile_display_name(active_profile)).strip()
+        if active_profile
+        else ""
+    )
+    switched_to_target = False
+    notification_sent = False
+    attempts = 0
+    main_error = ""
+    restore_error = ""
+    last_detail = ""
+
+    ctx.log(f"开始执行保活任务：{task['label']}")
+    ctx.log(f"目标 Profile：{target_profile_name}")
+    ctx.log(f"目标号码：{task['target_number']}")
+    if scheduled_for:
+        ctx.log(f"计划时间：{format_beijing_timestamp(scheduled_for)}")
+
+    try:
+        if task["profile_iccid"] != original_profile_iccid:
+            wait_for_keepalive_gap(ctx, settings["queue_gap_seconds"])
+            switch_profile(ctx, {"iccid": task["profile_iccid"]}, schedule_gap_after=False)
+            switched_to_target = True
+            ctx.sleep(KEEPALIVE_SWITCH_SETTLE_SECONDS, "等待切卡后的网络重新稳定")
+        else:
+            ctx.log("目标 Profile 当前已在使用，跳过切卡")
+
+        send_success = False
+        for attempt in range(1, KEEPALIVE_MAX_SEND_ATTEMPTS + 1):
+            attempts = attempt
+            ctx.log(f"开始第 {attempt} 次保活短信发送")
+            ready, detail = wait_for_modem_network_ready(ctx)
+            if not ready:
+                last_detail = detail
+                ctx.log(detail, "warning")
+            else:
+                send_keepalive_sms(ctx, task["target_number"], task["message"])
+                send_success = True
+                last_detail = "短信发送成功"
+                break
+            if attempt < KEEPALIVE_MAX_SEND_ATTEMPTS:
+                ctx.sleep(KEEPALIVE_RETRY_INTERVAL_SECONDS, "等待下一次保活短信尝试")
+
+        notify_keepalive_result(
+            ctx,
+            task,
+            profile_name=target_profile_name,
+            trigger=trigger,
+            scheduled_for=scheduled_for,
+            success=send_success,
+            attempts=attempts,
+            detail=last_detail,
+            original_profile_name=original_profile_name,
+        )
+        notification_sent = True
+        if not send_success:
+            main_error = f"保活短信连续 {KEEPALIVE_MAX_SEND_ATTEMPTS} 次失败：{last_detail or '未知原因'}"
+    except Exception as exc:
+        main_error = str(exc)
+        if not notification_sent:
+            notify_keepalive_result(
+                ctx,
+                task,
+                profile_name=target_profile_name,
+                trigger=trigger,
+                scheduled_for=scheduled_for,
+                success=False,
+                attempts=attempts,
+                detail=main_error,
+                original_profile_name=original_profile_name,
+            )
+            notification_sent = True
+    finally:
+        if switched_to_target:
+            try:
+                if original_profile_iccid:
+                    ctx.log(f"准备切回原 Profile：{original_profile_name or profile_name_for_iccid(original_profile_iccid, profiles)}")
+                    switch_profile(ctx, {"iccid": original_profile_iccid}, schedule_gap_after=False)
+                else:
+                    ctx.log("当前没有可识别的原始 Profile，已跳过回切", "warning")
+            except Exception as exc:
+                restore_error = str(exc)
+                ctx.log(f"切回原 Profile 失败：{restore_error}", "error")
+        schedule_keepalive_gap(settings["queue_gap_seconds"])
+
+    if restore_error and main_error:
+        raise RuntimeError(f"{main_error}；切回原 Profile 失败：{restore_error}")
+    if restore_error:
+        raise RuntimeError(f"切回原 Profile 失败：{restore_error}")
+    if main_error:
+        raise RuntimeError(main_error)
+    ctx.log("保活任务执行完成")
+
+
 def execute_action(action: str, payload: dict[str, Any], ctx: ActionContext) -> None:
     if action == "switch_profile":
         switch_profile(ctx, payload)
@@ -854,6 +1471,9 @@ def execute_action(action: str, payload: dict[str, Any], ctx: ActionContext) -> 
         return
     if action == "save_notifications":
         save_notifications_config(ctx, payload)
+        return
+    if action == "save_keepalive":
+        save_keepalive_settings(ctx, payload)
         return
     if action == "recover_modem":
         recover_modem(ctx)
@@ -869,6 +1489,9 @@ def execute_action(action: str, payload: dict[str, Any], ctx: ActionContext) -> 
         return
     if action == "apply_network_selection":
         apply_network_selection(ctx, payload)
+        return
+    if action == KEEPALIVE_ACTION_NAME:
+        run_keepalive_task(ctx, payload)
         return
     raise ValueError("不支持的操作")
 
@@ -888,25 +1511,113 @@ def run_action_worker(action_id: str, action: str, payload: dict[str, Any]) -> N
         ctx.log(f"执行失败：{error_message}", "error")
 
 
-def start_action(action: str, payload: dict[str, Any]) -> str:
+def start_action(action: str, payload: dict[str, Any], *, metadata: Optional[dict[str, Any]] = None) -> str:
     cleanup_actions()
+    effective_metadata = dict(metadata or {})
+    if action == KEEPALIVE_ACTION_NAME and not effective_metadata:
+        task_id = str(payload.get("task_id", "")).strip()
+        _, tasks = load_keepalive_config()
+        task = next((item for item in tasks if item["id"] == task_id), None)
+        if task:
+            effective_metadata = {
+                "kind": "keepalive",
+                "task_id": task["id"],
+                "label": task["label"],
+                "profile_iccid": task["profile_iccid"],
+                "profile_name": profile_name_for_iccid(task["profile_iccid"], get_cached_profiles()[0]),
+                "target_number": task["target_number"],
+                "scheduled_for": str(payload.get("scheduled_for", "")).strip(),
+                "trigger": str(payload.get("trigger", "manual")).strip() or "manual",
+            }
     action_id = uuid.uuid4().hex[:12]
     with ACTIONS_LOCK:
         ACTIONS[action_id] = {
             "id": action_id,
             "action": action,
+            "payload": dict(payload),
             "state": "queued",
             "events": [],
             "message": "",
             "error": "",
             "status": None,
+            "metadata": effective_metadata,
             "created_at": time.time(),
             "updated_at": time.time(),
         }
-
-    thread = threading.Thread(target=run_action_worker, args=(action_id, action, payload), daemon=True)
-    thread.start()
+    with ACTION_QUEUE_CONDITION:
+        ACTION_QUEUE.append(action_id)
+        ACTION_QUEUE_CONDITION.notify()
     return action_id
+
+
+def action_queue_worker() -> None:
+    while True:
+        with ACTION_QUEUE_CONDITION:
+            while not ACTION_QUEUE:
+                ACTION_QUEUE_CONDITION.wait()
+            action_id = ACTION_QUEUE.popleft()
+
+        with ACTIONS_LOCK:
+            record = ACTIONS.get(action_id)
+            if not record:
+                continue
+            action = str(record.get("action", "")).strip()
+            payload = record.get("payload", {})
+        if not isinstance(payload, dict):
+            payload = {}
+        run_action_worker(action_id, action, payload)
+
+
+def enqueue_keepalive_action(task: dict[str, Any], *, trigger: str, scheduled_for: Optional[datetime]) -> str:
+    scheduled_for_text = scheduled_for.isoformat() if scheduled_for else ""
+    metadata = {
+        "kind": "keepalive",
+        "task_id": task["id"],
+        "label": task["label"],
+        "profile_iccid": task["profile_iccid"],
+        "profile_name": profile_name_for_iccid(task["profile_iccid"], get_cached_profiles()[0]),
+        "target_number": task["target_number"],
+        "scheduled_for": scheduled_for_text,
+        "trigger": trigger,
+    }
+    return start_action(
+        KEEPALIVE_ACTION_NAME,
+        {
+            "task_id": task["id"],
+            "trigger": trigger,
+            "scheduled_for": scheduled_for_text,
+        },
+        metadata=metadata,
+    )
+
+
+def keepalive_scheduler() -> None:
+    while True:
+        try:
+            if esim_management_enabled():
+                _, tasks = load_keepalive_config()
+                now = datetime.now(BEIJING_TZ)
+                enabled_task_ids = {task["id"] for task in tasks if task["enabled"]}
+                with KEEPALIVE_RUNTIME_LOCK:
+                    stale_ids = [task_id for task_id in KEEPALIVE_LAST_ENQUEUED if task_id not in enabled_task_ids]
+                    for task_id in stale_ids:
+                        KEEPALIVE_LAST_ENQUEUED.pop(task_id, None)
+
+                for task in tasks:
+                    if not task["enabled"]:
+                        continue
+                    scheduled_at = due_keepalive_run(task, now)
+                    if not scheduled_at:
+                        continue
+                    schedule_key = keepalive_schedule_key(scheduled_at)
+                    with KEEPALIVE_RUNTIME_LOCK:
+                        if KEEPALIVE_LAST_ENQUEUED.get(task["id"]) == schedule_key:
+                            continue
+                        KEEPALIVE_LAST_ENQUEUED[task["id"]] = schedule_key
+                    enqueue_keepalive_action(task, trigger="schedule", scheduled_for=scheduled_at)
+        except Exception as exc:
+            print(f"keepalive scheduler failed: {exc}")
+        time.sleep(KEEPALIVE_SCHEDULER_INTERVAL_SECONDS)
 
 
 def get_action_snapshot(action_id: str, cursor: int) -> dict[str, Any]:
@@ -1054,6 +1765,10 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/notifications":
                 self._handle_sync_action("save_notifications", data)
                 return
+            if path == "/api/keepalive":
+                message = execute_sync_action("save_keepalive", data)
+                self._write_json(200, {"ok": True, "message": message, "status": get_status()})
+                return
             if path == "/api/modem/recover":
                 self._handle_sync_action("recover_modem", data)
                 return
@@ -1080,6 +1795,8 @@ def main() -> None:
             print(f"eSIM profile cache init failed: {exc}")
     else:
         print("eSIM management disabled for physical SIM mode")
+    threading.Thread(target=action_queue_worker, daemon=True).start()
+    threading.Thread(target=keepalive_scheduler, daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), AppHandler)
     print(f"4G WiFi admin listening on http://{HOST}:{PORT}")
     server.serve_forever()
