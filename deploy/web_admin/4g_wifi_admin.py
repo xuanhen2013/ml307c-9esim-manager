@@ -1918,10 +1918,19 @@ class AppHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _write_bytes(self, code: int, content_type: str, data: bytes) -> None:
+    def _write_bytes(
+        self,
+        code: int,
+        content_type: str,
+        data: bytes,
+        extra_headers: Optional[dict[str, str]] = None,
+    ) -> None:
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        if extra_headers:
+            for key, value in extra_headers.items():
+                self.send_header(key, value)
         self.end_headers()
         self.wfile.write(data)
 
@@ -1945,7 +1954,16 @@ class AppHandler(BaseHTTPRequestHandler):
             if "." not in Path(relative).name:
                 index_file = root / "index.html"
                 if index_file.exists():
-                    self._write_bytes(200, "text/html; charset=utf-8", index_file.read_bytes())
+                    stat = index_file.stat()
+                    self._write_bytes(
+                        200,
+                        "text/html; charset=utf-8",
+                        index_file.read_bytes(),
+                        extra_headers={
+                            "Cache-Control": "no-store, max-age=0",
+                            "Last-Modified": self.date_time_string(stat.st_mtime),
+                        },
+                    )
                     return True
             return False
 
@@ -1958,7 +1976,21 @@ class AppHandler(BaseHTTPRequestHandler):
             content_type = "text/css; charset=utf-8"
         elif candidate.suffix == ".json":
             content_type = "application/json; charset=utf-8"
-        self._write_bytes(200, content_type or "application/octet-stream", candidate.read_bytes())
+        stat = candidate.stat()
+        cache_control = "public, max-age=3600"
+        if candidate.suffix == ".html" or candidate.name.endswith(".webmanifest"):
+            cache_control = "no-store, max-age=0"
+        elif re.search(r"-[A-Za-z0-9_-]{8,}\.(?:js|css)$", candidate.name):
+            cache_control = "public, max-age=31536000, immutable"
+        self._write_bytes(
+            200,
+            content_type or "application/octet-stream",
+            candidate.read_bytes(),
+            extra_headers={
+                "Cache-Control": cache_control,
+                "Last-Modified": self.date_time_string(stat.st_mtime),
+            },
+        )
         return True
 
     def _handle_sync_action(self, action: str, payload: dict[str, Any]) -> None:
