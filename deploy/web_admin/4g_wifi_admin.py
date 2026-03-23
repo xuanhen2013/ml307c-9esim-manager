@@ -1632,6 +1632,15 @@ def send_test_sms(ctx: ActionContext, payload: dict[str, Any]) -> None:
         raise ValueError("缺少测试短信内容")
 
     ctx.log(f"开始发送测试短信到：{number}")
+    if esim_management_enabled():
+        profiles = refresh_profile_cache(force=True)
+        active_profile = active_profile_from_list(profiles)
+        active_iccid = str(active_profile.get("iccid", "")).strip()
+        if active_iccid:
+            if apply_profile_smsc_if_configured(ctx, active_iccid):
+                ctx.log("已按当前 Profile 自动应用短信中心")
+            else:
+                ctx.log("当前 Profile 未配置短信中心，继续按基带现有配置发送")
     ready, detail = wait_for_modem_network_ready(ctx, timeout_seconds=45, poll_seconds=5)
     if not ready:
         raise RuntimeError(detail)
@@ -1818,6 +1827,10 @@ def run_keepalive_task(ctx: ActionContext, payload: dict[str, Any]) -> None:
             ctx.sleep(KEEPALIVE_SWITCH_SETTLE_SECONDS, "等待切卡后的网络重新稳定")
         else:
             ctx.log("目标 Profile 当前已在使用，跳过切卡")
+            if apply_profile_smsc_if_configured(ctx, task["profile_iccid"]):
+                ctx.log("已按目标 Profile 自动应用短信中心")
+            else:
+                ctx.log("目标 Profile 未配置短信中心，继续按基带现有配置发送")
 
         send_success = False
         for attempt in range(1, KEEPALIVE_MAX_SEND_ATTEMPTS + 1):

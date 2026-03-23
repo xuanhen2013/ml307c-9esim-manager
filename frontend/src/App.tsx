@@ -832,6 +832,7 @@ function App() {
   const [keepaliveSettings, setKeepaliveSettings] = useState<KeepaliveSettings>({ queue_gap_seconds: 180 })
   const [keepaliveTasks, setKeepaliveTasks] = useState<KeepaliveFormTask[]>([])
   const [profileSmscForms, setProfileSmscForms] = useState<Record<string, ProfileSmscFormState>>({})
+  const [expandedProfileIccid, setExpandedProfileIccid] = useState<string | null>(null)
   const [apnForm, setApnForm] = useState<ApnFormState>({
     apn: "",
     username: "",
@@ -1264,6 +1265,13 @@ function App() {
     }
   }, [shellActionLabel])
 
+  useEffect(() => {
+    if (!expandedProfileIccid) return
+    if (!(status?.profiles ?? []).some((profile) => profile.iccid === expandedProfileIccid)) {
+      setExpandedProfileIccid(null)
+    }
+  }, [expandedProfileIccid, status?.profiles])
+
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(14,165,233,0.18),_transparent_30%),linear-gradient(180deg,_#f7f9fc_0%,_#eef3f7_100%)] pb-24 sm:pb-28">
       <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-4 px-4 py-4 sm:px-6 lg:px-8">
@@ -1421,6 +1429,7 @@ function App() {
                       const isCurrent = Boolean(profile.is_active)
                       const isSwitching =
                         activeAction?.action === "switch_profile" && activeAction.target === profile.iccid
+                      const isExpanded = expandedProfileIccid === profile.iccid
                       const smscForm = profileSmscForms[profile.iccid] ?? {
                         address: profile.smsc_address || "",
                         type: profile.smsc_type || "145",
@@ -1453,108 +1462,126 @@ function App() {
                                 <p className="text-sm text-muted-foreground">
                                   手机号：{isCurrent ? status?.modem.number || "--" : "--"}
                                 </p>
+                                <p className="text-sm text-muted-foreground">
+                                  短信中心：{profile.smsc_address ? `${profile.smsc_address},${profile.smsc_type || "145"}` : "未配置"}
+                                </p>
                               </div>
-                              <Button
-                                type="button"
-                                size="sm"
-                                variant={isCurrent ? "secondary" : "default"}
-                                disabled={actionBusy || isCurrent}
-                                onClick={() => {
-                                  void runAction(
-                                    "switch_profile",
-                                    { iccid: profile.iccid },
-                                    `切换到 ${profile.display_name}`,
-                                  )
-                                }}
-                              >
-                                {isSwitching ? (
-                                  <LoaderCircleIcon data-icon="inline-start" className="animate-spin" />
-                                ) : (
-                                  <ArrowRightIcon data-icon="inline-start" />
-                                )}
-                                {isCurrent ? "当前使用中" : "切换到此卡"}
-                              </Button>
+                              <div className="flex flex-wrap items-center justify-end gap-2">
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => {
+                                    setExpandedProfileIccid((current) => (current === profile.iccid ? null : profile.iccid))
+                                  }}
+                                >
+                                  <ChevronDownIcon
+                                    data-icon="inline-start"
+                                    className={cn("transition-transform", isExpanded && "rotate-180")}
+                                  />
+                                  {isExpanded ? "收起设置" : "展开设置"}
+                                </Button>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant={isCurrent ? "secondary" : "default"}
+                                  disabled={actionBusy || isCurrent}
+                                  onClick={() => {
+                                    void runAction(
+                                      "switch_profile",
+                                      { iccid: profile.iccid },
+                                      `切换到 ${profile.display_name}`,
+                                    )
+                                  }}
+                                >
+                                  {isSwitching ? (
+                                    <LoaderCircleIcon data-icon="inline-start" className="animate-spin" />
+                                  ) : (
+                                    <ArrowRightIcon data-icon="inline-start" />
+                                  )}
+                                  {isCurrent ? "当前使用中" : "切换到此卡"}
+                                </Button>
+                              </div>
                             </div>
                             <div className="grid gap-2 text-sm text-muted-foreground sm:grid-cols-2">
                               <span>ICCID：{profile.iccid || "--"}</span>
                               <span>状态：{profile.state || (isCurrent ? "enabled" : "--")}</span>
                             </div>
-                            <div className="rounded-2xl border border-border/70 bg-background/70 p-3">
-                              <div className="mb-3 flex flex-col gap-1">
-                                <h4 className="text-sm font-medium text-foreground">短信中心</h4>
-                                <p className="text-sm text-muted-foreground">
-                                  为当前 Profile 绑定 SMSC。切换到这张卡后会自动重新应用；当前使用中的 Profile 可以立即写入基带。
-                                </p>
-                              </div>
-                              <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_8rem]">
-                                <div className="grid gap-2">
-                                  <Label htmlFor={`profile-smsc-address-${profile.iccid}`}>SMSC 号码</Label>
-                                  <Input
-                                    id={`profile-smsc-address-${profile.iccid}`}
-                                    value={smscForm.address}
-                                    onChange={(event) => {
-                                      profileSmscDirtyRef.current = true
-                                      setProfileSmscForms((current) => ({
-                                        ...current,
-                                        [profile.iccid]: {
-                                          ...(current[profile.iccid] ?? { address: "", type: "145" }),
-                                          address: event.target.value,
-                                        },
-                                      }))
-                                    }}
-                                    placeholder={isGiffgaffProfile ? "+447802002606" : "例如 +447802002606"}
-                                  />
+                            {isExpanded ? (
+                              <div className="rounded-2xl border border-border/70 bg-background/70 p-3">
+                                <div className="mb-3 flex flex-col gap-1">
+                                  <h4 className="text-sm font-medium text-foreground">短信中心</h4>
+                                  <p className="text-sm text-muted-foreground">
+                                    为当前 Profile 绑定 SMSC。切换到这张卡后会自动重新应用；当前使用中的 Profile 可以立即写入基带。
+                                  </p>
                                 </div>
-                                <div className="grid gap-2">
-                                  <Label htmlFor={`profile-smsc-type-${profile.iccid}`}>类型</Label>
-                                  <Input
-                                    id={`profile-smsc-type-${profile.iccid}`}
-                                    value={smscForm.type}
-                                    onChange={(event) => {
-                                      profileSmscDirtyRef.current = true
-                                      setProfileSmscForms((current) => ({
-                                        ...current,
-                                        [profile.iccid]: {
-                                          ...(current[profile.iccid] ?? { address: "", type: "145" }),
-                                          type: event.target.value,
-                                        },
-                                      }))
-                                    }}
-                                    placeholder="145"
-                                  />
+                                <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_8rem]">
+                                  <div className="grid gap-2">
+                                    <Label htmlFor={`profile-smsc-address-${profile.iccid}`}>SMSC 号码</Label>
+                                    <Input
+                                      id={`profile-smsc-address-${profile.iccid}`}
+                                      value={smscForm.address}
+                                      onChange={(event) => {
+                                        profileSmscDirtyRef.current = true
+                                        setProfileSmscForms((current) => ({
+                                          ...current,
+                                          [profile.iccid]: {
+                                            ...(current[profile.iccid] ?? { address: "", type: "145" }),
+                                            address: event.target.value,
+                                          },
+                                        }))
+                                      }}
+                                      placeholder={isGiffgaffProfile ? "+447802002606" : "例如 +447802002606"}
+                                    />
+                                  </div>
+                                  <div className="grid gap-2">
+                                    <Label htmlFor={`profile-smsc-type-${profile.iccid}`}>类型</Label>
+                                    <Input
+                                      id={`profile-smsc-type-${profile.iccid}`}
+                                      value={smscForm.type}
+                                      onChange={(event) => {
+                                        profileSmscDirtyRef.current = true
+                                        setProfileSmscForms((current) => ({
+                                          ...current,
+                                          [profile.iccid]: {
+                                            ...(current[profile.iccid] ?? { address: "", type: "145" }),
+                                            type: event.target.value,
+                                          },
+                                        }))
+                                      }}
+                                      placeholder="145"
+                                    />
+                                  </div>
                                 </div>
-                              </div>
-                              <div className="mt-3 flex flex-wrap gap-2">
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  variant="outline"
-                                  disabled={actionBusy}
-                                  onClick={() => {
-                                    void saveProfileSmsc(profile)
-                                  }}
-                                >
-                                  <SendIcon data-icon="inline-start" />
-                                  {isCurrent ? "保存并应用" : "保存关联"}
-                                </Button>
-                                {isGiffgaffProfile ? (
+                                <div className="mt-3 flex flex-wrap gap-2">
                                   <Button
                                     type="button"
                                     size="sm"
                                     variant="outline"
                                     disabled={actionBusy}
                                     onClick={() => {
-                                      void saveProfileSmsc(profile, { address: "+447802002606", type: "145" })
+                                      void saveProfileSmsc(profile)
                                     }}
                                   >
-                                    套用 giffgaff SMSC
+                                    <SendIcon data-icon="inline-start" />
+                                    {isCurrent ? "保存并应用" : "保存关联"}
                                   </Button>
-                                ) : null}
+                                  {isGiffgaffProfile ? (
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="outline"
+                                      disabled={actionBusy}
+                                      onClick={() => {
+                                        void saveProfileSmsc(profile, { address: "+447802002606", type: "145" })
+                                      }}
+                                    >
+                                      套用 giffgaff SMSC
+                                    </Button>
+                                  ) : null}
+                                </div>
                               </div>
-                              <p className="mt-3 text-sm text-muted-foreground">
-                                当前保存值：{profile.smsc_address ? `${profile.smsc_address},${profile.smsc_type || "145"}` : "未配置"}
-                              </p>
-                            </div>
+                            ) : null}
                           </div>
                         </div>
                       )
