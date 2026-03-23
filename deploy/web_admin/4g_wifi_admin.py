@@ -1037,17 +1037,34 @@ def delete_sms(ctx: ActionContext, sms_path: str) -> None:
     )
 
 
-def send_keepalive_sms(ctx: ActionContext, number: str, text: str) -> None:
+def send_sms_message(
+    ctx: ActionContext,
+    number: str,
+    text: str,
+    *,
+    success_message: str,
+    failure_prefix: str,
+) -> None:
     sms_path = create_sms(ctx, number, text)
     try:
         run_logged_command(
             ctx,
             ["mmcli", "-s", sms_path, "--send"],
-            failure_prefix="发送保活短信失败：",
-            success_message="保活短信已发送",
+            failure_prefix=failure_prefix,
+            success_message=success_message,
         )
     finally:
         delete_sms(ctx, sms_path)
+
+
+def send_keepalive_sms(ctx: ActionContext, number: str, text: str) -> None:
+    send_sms_message(
+        ctx,
+        number,
+        text,
+        success_message="保活短信已发送",
+        failure_prefix="发送保活短信失败：",
+    )
 
 
 def keepalive_notification_payload(
@@ -1511,6 +1528,31 @@ def resend_last_sms(ctx: ActionContext) -> None:
     ctx.log(f"最后一条短信已重新推送到：{'、'.join(delivered_labels)}")
 
 
+def send_test_sms(ctx: ActionContext, payload: dict[str, Any]) -> None:
+    number = str(payload.get("number", "")).strip()
+    message = str(payload.get("message", "")).strip()
+    if not number:
+        raise ValueError("缺少测试短信目标号码")
+    if not message:
+        raise ValueError("缺少测试短信内容")
+
+    ctx.log(f"开始发送测试短信到：{number}")
+    ready, detail = wait_for_modem_network_ready(ctx, timeout_seconds=45, poll_seconds=5)
+    if not ready:
+        raise RuntimeError(detail)
+
+    for line in message.splitlines():
+        ctx.log(line)
+
+    send_sms_message(
+        ctx,
+        number,
+        message,
+        success_message="测试短信已发送",
+        failure_prefix="发送测试短信失败：",
+    )
+
+
 def apply_radio_mode(ctx: ActionContext, payload: dict[str, Any]) -> None:
     mode = str(payload.get("mode", "")).strip()
     commands = {
@@ -1695,6 +1737,9 @@ def execute_action(action: str, payload: dict[str, Any], ctx: ActionContext) -> 
         return
     if action == "resend_last_sms":
         resend_last_sms(ctx)
+        return
+    if action == "send_test_sms":
+        send_test_sms(ctx, payload)
         return
     if action == "apply_radio_mode":
         apply_radio_mode(ctx, payload)

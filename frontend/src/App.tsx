@@ -203,6 +203,7 @@ type ActionName =
   | "recover_modem"
   | "restart_sms"
   | "resend_last_sms"
+  | "send_test_sms"
   | "run_keepalive_task"
   | "save_apn"
   | "save_notifications"
@@ -241,6 +242,11 @@ type ApnFormState = {
   username: string
   password: string
   ip_type: string
+}
+
+type SmsTestFormState = {
+  number: string
+  message: string
 }
 
 type KeepaliveFormTask = {
@@ -781,6 +787,8 @@ function friendlyActionName(action: ActionName) {
       return "重启短信转发"
     case "resend_last_sms":
       return "重发最后一条短信"
+    case "send_test_sms":
+      return "发送测试短信"
     case "run_keepalive_task":
       return "执行保活任务"
     case "save_apn":
@@ -806,6 +814,10 @@ function App() {
   const [newNotificationType, setNewNotificationType] = useState<ChannelKind>("bark")
   const [keepaliveSettings, setKeepaliveSettings] = useState<KeepaliveSettings>({ queue_gap_seconds: 180 })
   const [keepaliveTasks, setKeepaliveTasks] = useState<KeepaliveFormTask[]>([])
+  const [smsTestForm, setSmsTestForm] = useState<SmsTestFormState>({
+    number: "",
+    message: "ESMF TEST",
+  })
   const [apnForm, setApnForm] = useState<ApnFormState>({
     apn: "",
     username: "",
@@ -815,6 +827,7 @@ function App() {
   const [networkCode, setNetworkCode] = useState("")
   const [radioMode, setRadioMode] = useState("3g4g_prefer4g")
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [shellPanelOpen, setShellPanelOpen] = useState(false)
 
   const notificationsDirtyRef = useRef(false)
   const keepaliveDirtyRef = useRef(false)
@@ -1118,6 +1131,20 @@ function App() {
     }
   }, [activeAction, appendLog, keepaliveSettings, keepaliveTasks, refreshStatus, submittingActionLabel, syncFormsFromStatus])
 
+  const sendTestSms = useCallback(async () => {
+    const number = smsTestForm.number.trim()
+    const message = smsTestForm.message.trim()
+    if (!number) {
+      toast.error("请先填写测试短信目标号码")
+      return
+    }
+    if (!message) {
+      toast.error("请先填写测试短信内容")
+      return
+    }
+    await runAction("send_test_sms", { number, message }, `发送测试短信到 ${number}`)
+  }, [runAction, smsTestForm.message, smsTestForm.number])
+
   useEffect(() => {
     void refreshStatus(true)
     const persistedRaw = window.localStorage.getItem(ACTIVE_ACTION_KEY)
@@ -1180,8 +1207,14 @@ function App() {
   const configuredNotificationTypes = new Set(notificationTargets.map((target) => target.type))
   const availableNotificationTypes = NOTIFICATION_CHANNEL_ORDER.filter((type) => !configuredNotificationTypes.has(type))
 
+  useEffect(() => {
+    if (shellActionLabel) {
+      setShellPanelOpen(true)
+    }
+  }, [shellActionLabel])
+
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(14,165,233,0.18),_transparent_30%),linear-gradient(180deg,_#f7f9fc_0%,_#eef3f7_100%)]">
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(14,165,233,0.18),_transparent_30%),linear-gradient(180deg,_#f7f9fc_0%,_#eef3f7_100%)] pb-24 sm:pb-28">
       <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-4 px-4 py-4 sm:px-6 lg:px-8">
         <Card className="border-white/60 bg-white/85 backdrop-blur">
           <CardHeader className="gap-3">
@@ -1433,8 +1466,70 @@ function App() {
                 </CardAction>
               </div>
             </CardHeader>
-            <CardContent className="h-full pb-4">
-              <ScrollArea className="h-[22.5rem] rounded-xl border border-border/70 bg-background/70">
+            <CardContent className="flex h-full min-h-0 flex-col gap-4 pb-4">
+              <div className="rounded-2xl border border-border/70 bg-background/70 p-4">
+                <div className="mb-3 flex items-center gap-2">
+                  <SendIcon className="text-muted-foreground" />
+                  <div>
+                    <h3 className="font-medium">立即发短信测试</h3>
+                    <p className="text-sm text-muted-foreground">
+                      使用当前基带立即发送一条测试短信，用于确认短信发送链路是否正常。
+                    </p>
+                  </div>
+                </div>
+                <div className="grid gap-3">
+                  <div className="grid gap-2">
+                    <Label htmlFor="sms-test-number">目标号码</Label>
+                    <Input
+                      id="sms-test-number"
+                      value={smsTestForm.number}
+                      onChange={(event) => {
+                        setSmsTestForm((current) => ({ ...current, number: event.target.value }))
+                      }}
+                      placeholder={status?.modem.number && status.modem.number !== "--" ? `例如 ${status.modem.number}` : "例如 +447000000000"}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="sms-test-message">短信内容</Label>
+                    <Textarea
+                      id="sms-test-message"
+                      value={smsTestForm.message}
+                      onChange={(event) => {
+                        setSmsTestForm((current) => ({ ...current, message: event.target.value }))
+                      }}
+                      rows={3}
+                      placeholder="输入测试短信内容"
+                    />
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      disabled={actionBusy}
+                      onClick={() => {
+                        void sendTestSms()
+                      }}
+                    >
+                      <SendIcon data-icon="inline-start" />
+                      立即发送测试短信
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={actionBusy}
+                      onClick={() => {
+                        setSmsTestForm({
+                          number: "",
+                          message: "ESMF TEST",
+                        })
+                      }}
+                    >
+                      恢复默认内容
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              <ScrollArea className="min-h-0 flex-1 rounded-xl border border-border/70 bg-background/70">
                 <div className="flex flex-col gap-3 p-3">
                   {status?.sms.length ? (
                     status.sms.map((sms) => (
@@ -1464,65 +1559,6 @@ function App() {
             </CardContent>
           </Card>
         </div>
-
-        <Card className="border-white/60 bg-slate-950 text-slate-100 shadow-xl">
-          <CardHeader>
-            <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
-              <div className="flex flex-col gap-1">
-                <CardTitle className="flex items-center gap-2 text-slate-50">
-                  <TerminalSquareIcon />
-                  Shell 执行面板
-                </CardTitle>
-                <CardDescription className="text-slate-400">
-                  每个任务都会把当前步骤同步到这里，页面关闭后重新打开也会尝试恢复追踪。
-                </CardDescription>
-              </div>
-              <div className="flex items-center gap-2">
-                {shellActionLabel ? (
-                  <Badge variant="outline" className="border-sky-400/40 text-sky-200">
-                    <LoaderCircleIcon data-icon="inline-start" className="animate-spin" />
-                    {shellActionLabel}
-                  </Badge>
-                ) : (
-                  <Badge variant="outline" className="border-slate-700 text-slate-300">
-                    空闲
-                  </Badge>
-                )}
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  className="text-slate-100 hover:bg-slate-800 hover:text-white"
-                  onClick={() => {
-                    setLogs([])
-                  }}
-                >
-                  清空日志
-                </Button>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent className="pb-4">
-            <ScrollArea className="h-[19rem] rounded-xl border border-slate-800 bg-slate-950/80">
-              <div className="flex min-h-full flex-col gap-2 p-3 font-mono text-sm">
-                {logs.length ? (
-                  logs.map((line, index) => (
-                    <div key={`${line.time}-${index}`} className="grid grid-cols-[80px_1fr] gap-3">
-                      <span className="text-slate-400">{line.time}</span>
-                      <span className={cn("whitespace-pre-wrap break-words", levelClassName(line.level))}>
-                        {line.message}
-                      </span>
-                    </div>
-                  ))
-                ) : (
-                  <div className="flex h-full min-h-[14rem] items-center justify-center text-slate-500">
-                    暂时还没有任务日志，点任意操作后这里会实时显示执行进度。
-                  </div>
-                )}
-              </div>
-            </ScrollArea>
-          </CardContent>
-        </Card>
 
         <Card className="border-white/60 bg-white/85 backdrop-blur">
           <CardHeader>
@@ -2398,6 +2434,88 @@ function App() {
             </div>
           </CardContent>
         </Card>
+      </div>
+
+      <div className="fixed inset-x-0 bottom-0 z-40 px-4 pb-4 sm:px-6 lg:px-8">
+        <div className="mx-auto w-full max-w-7xl">
+          <Card className="relative border-slate-800 bg-slate-950/95 text-slate-100 shadow-2xl backdrop-blur">
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              className="absolute left-1/2 top-0 h-9 -translate-x-1/2 -translate-y-1/2 rounded-full border border-slate-700 bg-slate-900 px-4 text-slate-100 hover:bg-slate-800"
+              onClick={() => {
+                setShellPanelOpen((current) => !current)
+              }}
+            >
+              <ChevronDownIcon
+                data-icon="inline-start"
+                className={cn("transition-transform", !shellPanelOpen && "rotate-180")}
+              />
+              {shellPanelOpen ? "收起日志" : "展开日志"}
+            </Button>
+
+            <CardHeader className="pb-3 pt-5">
+              <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+                <div className="flex flex-col gap-1">
+                  <CardTitle className="flex items-center gap-2 text-slate-50">
+                    <TerminalSquareIcon />
+                    Shell 执行面板
+                  </CardTitle>
+                  <CardDescription className="text-slate-400">
+                    每个任务都会把当前步骤同步到这里，页面关闭后重新打开也会尝试恢复追踪。
+                  </CardDescription>
+                </div>
+                <div className="flex items-center gap-2">
+                  {shellActionLabel ? (
+                    <Badge variant="outline" className="border-sky-400/40 text-sky-200">
+                      <LoaderCircleIcon data-icon="inline-start" className="animate-spin" />
+                      {shellActionLabel}
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="border-slate-700 text-slate-300">
+                      空闲
+                    </Badge>
+                  )}
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="text-slate-100 hover:bg-slate-800 hover:text-white"
+                    onClick={() => {
+                      setLogs([])
+                    }}
+                  >
+                    清空日志
+                  </Button>
+                </div>
+              </div>
+            </CardHeader>
+
+            {shellPanelOpen ? (
+              <CardContent className="pb-4">
+                <ScrollArea className="h-[18rem] rounded-xl border border-slate-800 bg-slate-950/80">
+                  <div className="flex min-h-full flex-col gap-2 p-3 font-mono text-sm">
+                    {logs.length ? (
+                      logs.map((line, index) => (
+                        <div key={`${line.time}-${index}`} className="grid grid-cols-[80px_1fr] gap-3">
+                          <span className="text-slate-400">{line.time}</span>
+                          <span className={cn("whitespace-pre-wrap break-words", levelClassName(line.level))}>
+                            {line.message}
+                          </span>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="flex h-full min-h-[12rem] items-center justify-center text-slate-500">
+                        暂时还没有任务日志，点任意操作后这里会实时显示执行进度。
+                      </div>
+                    )}
+                  </div>
+                </ScrollArea>
+              </CardContent>
+            ) : null}
+          </Card>
+        </div>
       </div>
       <Toaster richColors position="top-right" />
     </div>
