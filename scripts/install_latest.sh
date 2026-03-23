@@ -48,12 +48,21 @@ download_file() {
     url=$1
     output=$2
     if command -v curl >/dev/null 2>&1; then
-        if curl --http1.1 -fL --retry 2 --connect-timeout 15 --max-time 300 -o "${output}" "${url}"; then
+        if curl \
+            --http1.1 \
+            -fL \
+            --retry 1 \
+            --connect-timeout 10 \
+            --max-time 90 \
+            --speed-time 20 \
+            --speed-limit 1024 \
+            -o "${output}" \
+            "${url}"; then
             return 0
         fi
     fi
     if command -v wget >/dev/null 2>&1; then
-        if wget --tries=2 --timeout=60 --max-redirect=20 -O "${output}" "${url}"; then
+        if wget --tries=1 --timeout=20 --max-redirect=20 -O "${output}" "${url}"; then
             return 0
         fi
     fi
@@ -129,22 +138,22 @@ main() {
     extract_dir="${TMP_DIR}/package"
     mkdir -p "${extract_dir}"
 
-    release_url="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest/download/${ASSET_NAME}"
     source_url="https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/zip/refs/heads/main"
+    release_url="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest/download/${ASSET_NAME}"
 
-    log "尝试下载最新发布包"
-    if download_file "${release_url}" "${archive_path}"; then
-        log "已下载 Release 包"
+    log "优先下载源码包"
+    if download_file "${source_url}" "${archive_path}"; then
+        log "已下载源码包"
     else
-        warn "最新 Release 不可用，回退到 main 分支源码包"
-        download_file "${source_url}" "${archive_path}"
+        warn "源码包下载失败，尝试下载最新 Release 包"
+        download_file "${release_url}" "${archive_path}" || die "源码包与 Release 包均下载失败"
     fi
 
     ensure_extract_dependencies
 
     log "解压安装包"
     if ! extract_zip "${archive_path}" "${extract_dir}"; then
-        warn "Release 包解压失败，回退到 main 分支源码包"
+        warn "安装包解压失败，尝试重新下载源码包"
         rm -f "${archive_path}"
         download_file "${source_url}" "${archive_path}"
         extract_zip "${archive_path}" "${extract_dir}"

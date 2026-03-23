@@ -98,12 +98,20 @@ download_file() {
     url=$1
     output=$2
     if command -v curl >/dev/null 2>&1; then
-        if curl -fL --retry 2 --connect-timeout 15 --max-time 120 -o "${output}" "${url}"; then
+        if curl \
+            -fL \
+            --retry 1 \
+            --connect-timeout 10 \
+            --max-time 90 \
+            --speed-time 20 \
+            --speed-limit 1024 \
+            -o "${output}" \
+            "${url}"; then
             return 0
         fi
     fi
     if command -v wget >/dev/null 2>&1; then
-        if wget -O "${output}" "${url}"; then
+        if wget --tries=1 --timeout=20 --max-redirect=20 -O "${output}" "${url}"; then
             return 0
         fi
     fi
