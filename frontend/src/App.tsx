@@ -831,6 +831,7 @@ function App() {
   const [newNotificationType, setNewNotificationType] = useState<ChannelKind>("bark")
   const [keepaliveSettings, setKeepaliveSettings] = useState<KeepaliveSettings>({ queue_gap_seconds: 180 })
   const [keepaliveTasks, setKeepaliveTasks] = useState<KeepaliveFormTask[]>([])
+  const [expandedKeepaliveTaskId, setExpandedKeepaliveTaskId] = useState<string | null>(null)
   const [profileSmscForms, setProfileSmscForms] = useState<Record<string, ProfileSmscFormState>>({})
   const [expandedProfileIccid, setExpandedProfileIccid] = useState<string | null>(null)
   const [apnForm, setApnForm] = useState<ApnFormState>({
@@ -1264,6 +1265,13 @@ function App() {
       setShellPanelOpen(true)
     }
   }, [shellActionLabel])
+
+  useEffect(() => {
+    if (!expandedKeepaliveTaskId) return
+    if (!keepaliveTasks.some((task) => task.id === expandedKeepaliveTaskId)) {
+      setExpandedKeepaliveTaskId(null)
+    }
+  }, [expandedKeepaliveTaskId, keepaliveTasks])
 
   useEffect(() => {
     if (!expandedProfileIccid) return
@@ -1917,8 +1925,10 @@ function App() {
                           variant="outline"
                           disabled={actionBusy || !status?.profiles.length}
                           onClick={() => {
+                            const nextTask = createKeepaliveTask(status?.profiles ?? [])
                             keepaliveDirtyRef.current = true
-                            setKeepaliveTasks((current) => [...current, createKeepaliveTask(status?.profiles ?? [])])
+                            setKeepaliveTasks((current) => [...current, nextTask])
+                            setExpandedKeepaliveTaskId(nextTask.id)
                           }}
                         >
                           <PlusIcon data-icon="inline-start" />
@@ -1955,22 +1965,26 @@ function App() {
                         {keepaliveTasks.length ? (
                           keepaliveTasks.map((task) => {
                             const savedTask = keepalive.tasks.find((item) => item.id === task.id)
+                            const profileName =
+                              savedTask?.profile_name ||
+                              (status?.profiles ?? []).find((profile) => profile.iccid === task.profile_iccid)?.display_name ||
+                              "待选择 Profile"
+                            const isExpanded = expandedKeepaliveTaskId === task.id
                             return (
                               <div key={task.id} className="rounded-2xl border border-border/70 bg-white/80 p-4 shadow-sm">
                                 <div className="flex flex-col gap-4">
-                                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                                    <div className="flex flex-col gap-2">
+                                  <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                                    <div className="flex min-w-0 flex-1 flex-col gap-2">
                                       <div className="flex flex-wrap items-center gap-2">
-                                        <Badge variant="outline">{savedTask?.profile_name || "待选择 Profile"}</Badge>
+                                        <span className="truncate text-sm font-medium text-foreground">{task.label || "未命名任务"}</span>
+                                        <Badge variant="outline">{profileName}</Badge>
                                         <Badge variant="secondary">{task.enabled ? "已启用" : "已停用"}</Badge>
                                         <Badge variant="outline">{savedTask?.schedule_label || task.cron_expression || "--"}</Badge>
                                         {savedTask?.next_run_label ? (
                                           <Badge variant="outline">{savedTask.next_run_label}</Badge>
                                         ) : null}
+                                        {task.target_number ? <Badge variant="outline">{task.target_number}</Badge> : null}
                                       </div>
-                                      <p className="text-sm text-muted-foreground">
-                                        未保存的修改会在保存保活配置后参与调度与手动执行。
-                                      </p>
                                     </div>
                                     <div className="flex flex-wrap items-center gap-2">
                                       <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -1990,148 +2004,172 @@ function App() {
                                         type="button"
                                         size="sm"
                                         variant="outline"
-                                        disabled={actionBusy}
                                         onClick={() => {
-                                          void sendKeepaliveTestSms(task)
+                                          setExpandedKeepaliveTaskId((current) => (current === task.id ? null : task.id))
                                         }}
                                       >
-                                        <SendIcon data-icon="inline-start" />
-                                        测试短信
-                                      </Button>
-                                      <Button
-                                        type="button"
-                                        size="sm"
-                                        variant="outline"
-                                        disabled={actionBusy || !savedTask}
-                                        onClick={() => {
-                                          void runAction(
-                                            "run_keepalive_task",
-                                            { task_id: task.id, trigger: "manual" },
-                                            `执行保活 ${task.label}`,
-                                          )
-                                        }}
-                                      >
-                                        <SendIcon data-icon="inline-start" />
-                                        立即执行
-                                      </Button>
-                                      <Button
-                                        type="button"
-                                        size="sm"
-                                        variant="outline"
-                                        disabled={actionBusy}
-                                        onClick={() => {
-                                          keepaliveDirtyRef.current = true
-                                          setKeepaliveTasks((current) => current.filter((item) => item.id !== task.id))
-                                        }}
-                                      >
-                                        <Trash2Icon data-icon="inline-start" />
-                                        删除
+                                        <ChevronDownIcon
+                                          data-icon="inline-start"
+                                          className={cn("transition-transform", isExpanded && "rotate-180")}
+                                        />
+                                        {isExpanded ? "收起设置" : "展开设置"}
                                       </Button>
                                     </div>
                                   </div>
 
-                                  <div className="grid gap-4 md:grid-cols-2">
-                                    <div className="grid gap-2">
-                                      <Label htmlFor={`keepalive-label-${task.id}`}>任务名称</Label>
-                                      <Input
-                                        id={`keepalive-label-${task.id}`}
-                                        value={task.label}
-                                        onChange={(event) => {
-                                          keepaliveDirtyRef.current = true
-                                          setKeepaliveTasks((current) =>
-                                            current.map((item) =>
-                                              item.id === task.id ? { ...item, label: event.target.value } : item,
-                                            ),
-                                          )
-                                        }}
-                                        placeholder="例如 EE 保活"
-                                      />
-                                    </div>
-                                    <div className="grid gap-2 md:col-span-2">
-                                      <Label>目标 Profile</Label>
-                                      <Select
-                                        value={task.profile_iccid}
-                                        onValueChange={(value) => {
-                                          keepaliveDirtyRef.current = true
-                                          setKeepaliveTasks((current) =>
-                                            current.map((item) =>
-                                              item.id === task.id ? { ...item, profile_iccid: value ?? "" } : item,
-                                            ),
-                                          )
-                                        }}
-                                      >
-                                        <SelectTrigger className="w-full">
-                                          <SelectValue placeholder="选择 Profile" />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                          <SelectGroup>
-                                            <SelectLabel>Profiles</SelectLabel>
-                                            {(status?.profiles ?? []).map((profile) => (
-                                              <SelectItem key={profile.iccid} value={profile.iccid}>
-                                                {profile.display_name}
-                                              </SelectItem>
-                                            ))}
-                                          </SelectGroup>
-                                        </SelectContent>
-                                      </Select>
-                                    </div>
-                                    <div className="grid gap-2 md:col-span-2">
-                                      <Label htmlFor={`keepalive-cron-${task.id}`}>cron 表达式</Label>
-                                      <Input
-                                        id={`keepalive-cron-${task.id}`}
-                                        value={task.cron_expression}
-                                        onChange={(event) => {
-                                          keepaliveDirtyRef.current = true
-                                          setKeepaliveTasks((current) =>
-                                            current.map((item) =>
-                                              item.id === task.id ? { ...item, cron_expression: event.target.value } : item,
-                                            ),
-                                          )
-                                        }}
-                                        placeholder="例如 0 9 1 * *"
-                                      />
+                                  {isExpanded ? (
+                                    <>
                                       <p className="text-sm text-muted-foreground">
-                                        采用 5 段 cron：分钟 小时 日 月 星期。示例：`0 9 * * *` 表示每天 09:00，`0 9 1 * *` 表示每月 1 日 09:00。
+                                        未保存的修改会在保存保活配置后参与调度与手动执行。
                                       </p>
-                                    </div>
-                                    <div className="grid gap-2">
-                                      <Label htmlFor={`keepalive-number-${task.id}`}>短信目标号码</Label>
-                                      <Input
-                                        id={`keepalive-number-${task.id}`}
-                                        value={task.target_number}
-                                        onChange={(event) => {
-                                          keepaliveDirtyRef.current = true
-                                          setKeepaliveTasks((current) =>
-                                            current.map((item) =>
-                                              item.id === task.id ? { ...item, target_number: event.target.value } : item,
-                                            ),
-                                          )
-                                        }}
-                                        placeholder="例如 +447000000000"
-                                      />
-                                    </div>
-                                  </div>
+                                      <div className="flex flex-wrap items-center gap-2">
+                                        <Button
+                                          type="button"
+                                          size="sm"
+                                          variant="outline"
+                                          disabled={actionBusy}
+                                          onClick={() => {
+                                            void sendKeepaliveTestSms(task)
+                                          }}
+                                        >
+                                          <SendIcon data-icon="inline-start" />
+                                          测试短信
+                                        </Button>
+                                        <Button
+                                          type="button"
+                                          size="sm"
+                                          variant="outline"
+                                          disabled={actionBusy || !savedTask}
+                                          onClick={() => {
+                                            void runAction(
+                                              "run_keepalive_task",
+                                              { task_id: task.id, trigger: "manual" },
+                                              `执行保活 ${task.label}`,
+                                            )
+                                          }}
+                                        >
+                                          <SendIcon data-icon="inline-start" />
+                                          立即执行
+                                        </Button>
+                                        <Button
+                                          type="button"
+                                          size="sm"
+                                          variant="outline"
+                                          disabled={actionBusy}
+                                          onClick={() => {
+                                            keepaliveDirtyRef.current = true
+                                            setKeepaliveTasks((current) => current.filter((item) => item.id !== task.id))
+                                          }}
+                                        >
+                                          <Trash2Icon data-icon="inline-start" />
+                                          删除
+                                        </Button>
+                                      </div>
 
-                                  <div className="grid gap-2">
-                                    <Label htmlFor={`keepalive-message-${task.id}`}>短信内容</Label>
-                                    <Textarea
-                                      id={`keepalive-message-${task.id}`}
-                                      value={task.message}
-                                      onChange={(event) => {
-                                        keepaliveDirtyRef.current = true
-                                        setKeepaliveTasks((current) =>
-                                          current.map((item) =>
-                                            item.id === task.id ? { ...item, message: event.target.value } : item,
-                                          ),
-                                        )
-                                      }}
-                                      rows={4}
-                                      placeholder="输入用于保活的短信内容"
-                                    />
-                                    <p className="text-sm text-muted-foreground">
-                                      “测试短信”会使用当前填写的目标号码与短信内容立即发送一条短信，用于确认保活参数是否可用。
-                                    </p>
-                                  </div>
+                                      <div className="grid gap-4 md:grid-cols-2">
+                                        <div className="grid gap-2">
+                                          <Label htmlFor={`keepalive-label-${task.id}`}>任务名称</Label>
+                                          <Input
+                                            id={`keepalive-label-${task.id}`}
+                                            value={task.label}
+                                            onChange={(event) => {
+                                              keepaliveDirtyRef.current = true
+                                              setKeepaliveTasks((current) =>
+                                                current.map((item) =>
+                                                  item.id === task.id ? { ...item, label: event.target.value } : item,
+                                                ),
+                                              )
+                                            }}
+                                            placeholder="例如 EE 保活"
+                                          />
+                                        </div>
+                                        <div className="grid gap-2 md:col-span-2">
+                                          <Label>目标 Profile</Label>
+                                          <Select
+                                            value={task.profile_iccid}
+                                            onValueChange={(value) => {
+                                              keepaliveDirtyRef.current = true
+                                              setKeepaliveTasks((current) =>
+                                                current.map((item) =>
+                                                  item.id === task.id ? { ...item, profile_iccid: value ?? "" } : item,
+                                                ),
+                                              )
+                                            }}
+                                          >
+                                            <SelectTrigger className="w-full">
+                                              <SelectValue placeholder="选择 Profile" />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                              <SelectGroup>
+                                                <SelectLabel>Profiles</SelectLabel>
+                                                {(status?.profiles ?? []).map((profile) => (
+                                                  <SelectItem key={profile.iccid} value={profile.iccid}>
+                                                    {profile.display_name}
+                                                  </SelectItem>
+                                                ))}
+                                              </SelectGroup>
+                                            </SelectContent>
+                                          </Select>
+                                        </div>
+                                        <div className="grid gap-2 md:col-span-2">
+                                          <Label htmlFor={`keepalive-cron-${task.id}`}>cron 表达式</Label>
+                                          <Input
+                                            id={`keepalive-cron-${task.id}`}
+                                            value={task.cron_expression}
+                                            onChange={(event) => {
+                                              keepaliveDirtyRef.current = true
+                                              setKeepaliveTasks((current) =>
+                                                current.map((item) =>
+                                                  item.id === task.id ? { ...item, cron_expression: event.target.value } : item,
+                                                ),
+                                              )
+                                            }}
+                                            placeholder="例如 0 9 1 * *"
+                                          />
+                                          <p className="text-sm text-muted-foreground">
+                                            采用 5 段 cron：分钟 小时 日 月 星期。示例：`0 9 * * *` 表示每天 09:00，`0 9 1 * *` 表示每月 1 日 09:00。
+                                          </p>
+                                        </div>
+                                        <div className="grid gap-2">
+                                          <Label htmlFor={`keepalive-number-${task.id}`}>短信目标号码</Label>
+                                          <Input
+                                            id={`keepalive-number-${task.id}`}
+                                            value={task.target_number}
+                                            onChange={(event) => {
+                                              keepaliveDirtyRef.current = true
+                                              setKeepaliveTasks((current) =>
+                                                current.map((item) =>
+                                                  item.id === task.id ? { ...item, target_number: event.target.value } : item,
+                                                ),
+                                              )
+                                            }}
+                                            placeholder="例如 +447000000000"
+                                          />
+                                        </div>
+                                      </div>
+
+                                      <div className="grid gap-2">
+                                        <Label htmlFor={`keepalive-message-${task.id}`}>短信内容</Label>
+                                        <Textarea
+                                          id={`keepalive-message-${task.id}`}
+                                          value={task.message}
+                                          onChange={(event) => {
+                                            keepaliveDirtyRef.current = true
+                                            setKeepaliveTasks((current) =>
+                                              current.map((item) =>
+                                                item.id === task.id ? { ...item, message: event.target.value } : item,
+                                              ),
+                                            )
+                                          }}
+                                          rows={4}
+                                          placeholder="输入用于保活的短信内容"
+                                        />
+                                        <p className="text-sm text-muted-foreground">
+                                          “测试短信”会使用当前填写的目标号码与短信内容立即发送一条短信，用于确认保活参数是否可用。
+                                        </p>
+                                      </div>
+                                    </>
+                                  ) : null}
                                 </div>
                               </div>
                             )
