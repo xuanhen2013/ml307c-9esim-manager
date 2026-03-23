@@ -244,11 +244,6 @@ type ApnFormState = {
   ip_type: string
 }
 
-type SmsTestFormState = {
-  number: string
-  message: string
-}
-
 type KeepaliveFormTask = {
   id: string
   label: string
@@ -814,10 +809,6 @@ function App() {
   const [newNotificationType, setNewNotificationType] = useState<ChannelKind>("bark")
   const [keepaliveSettings, setKeepaliveSettings] = useState<KeepaliveSettings>({ queue_gap_seconds: 180 })
   const [keepaliveTasks, setKeepaliveTasks] = useState<KeepaliveFormTask[]>([])
-  const [smsTestForm, setSmsTestForm] = useState<SmsTestFormState>({
-    number: "",
-    message: "ESMF TEST",
-  })
   const [apnForm, setApnForm] = useState<ApnFormState>({
     apn: "",
     username: "",
@@ -1131,19 +1122,20 @@ function App() {
     }
   }, [activeAction, appendLog, keepaliveSettings, keepaliveTasks, refreshStatus, submittingActionLabel, syncFormsFromStatus])
 
-  const sendTestSms = useCallback(async () => {
-    const number = smsTestForm.number.trim()
-    const message = smsTestForm.message.trim()
+  const sendKeepaliveTestSms = useCallback(async (task: KeepaliveFormTask) => {
+    const number = task.target_number.trim()
+    const message = task.message.trim()
+    const taskLabel = task.label.trim() || "保活任务"
     if (!number) {
-      toast.error("请先填写测试短信目标号码")
+      toast.error(`保活任务 ${taskLabel} 缺少目标手机号`)
       return
     }
     if (!message) {
-      toast.error("请先填写测试短信内容")
+      toast.error(`保活任务 ${taskLabel} 缺少短信内容`)
       return
     }
-    await runAction("send_test_sms", { number, message }, `发送测试短信到 ${number}`)
-  }, [runAction, smsTestForm.message, smsTestForm.number])
+    await runAction("send_test_sms", { number, message }, `测试保活短信 ${taskLabel}`)
+  }, [runAction])
 
   useEffect(() => {
     void refreshStatus(true)
@@ -1466,69 +1458,7 @@ function App() {
                 </CardAction>
               </div>
             </CardHeader>
-            <CardContent className="flex h-full min-h-0 flex-col gap-4 pb-4">
-              <div className="rounded-2xl border border-border/70 bg-background/70 p-4">
-                <div className="mb-3 flex items-center gap-2">
-                  <SendIcon className="text-muted-foreground" />
-                  <div>
-                    <h3 className="font-medium">立即发短信测试</h3>
-                    <p className="text-sm text-muted-foreground">
-                      使用当前基带立即发送一条测试短信，用于确认短信发送链路是否正常。
-                    </p>
-                  </div>
-                </div>
-                <div className="grid gap-3">
-                  <div className="grid gap-2">
-                    <Label htmlFor="sms-test-number">目标号码</Label>
-                    <Input
-                      id="sms-test-number"
-                      value={smsTestForm.number}
-                      onChange={(event) => {
-                        setSmsTestForm((current) => ({ ...current, number: event.target.value }))
-                      }}
-                      placeholder={status?.modem.number && status.modem.number !== "--" ? `例如 ${status.modem.number}` : "例如 +447000000000"}
-                    />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="sms-test-message">短信内容</Label>
-                    <Textarea
-                      id="sms-test-message"
-                      value={smsTestForm.message}
-                      onChange={(event) => {
-                        setSmsTestForm((current) => ({ ...current, message: event.target.value }))
-                      }}
-                      rows={3}
-                      placeholder="输入测试短信内容"
-                    />
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      type="button"
-                      disabled={actionBusy}
-                      onClick={() => {
-                        void sendTestSms()
-                      }}
-                    >
-                      <SendIcon data-icon="inline-start" />
-                      立即发送测试短信
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      disabled={actionBusy}
-                      onClick={() => {
-                        setSmsTestForm({
-                          number: "",
-                          message: "ESMF TEST",
-                        })
-                      }}
-                    >
-                      恢复默认内容
-                    </Button>
-                  </div>
-                </div>
-              </div>
-
+            <CardContent className="flex h-full min-h-0 flex-col pb-4">
               <ScrollArea className="min-h-0 flex-1 rounded-xl border border-border/70 bg-background/70">
                 <div className="flex flex-col gap-3 p-3">
                   {status?.sms.length ? (
@@ -1891,6 +1821,18 @@ function App() {
                                         type="button"
                                         size="sm"
                                         variant="outline"
+                                        disabled={actionBusy}
+                                        onClick={() => {
+                                          void sendKeepaliveTestSms(task)
+                                        }}
+                                      >
+                                        <SendIcon data-icon="inline-start" />
+                                        测试短信
+                                      </Button>
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="outline"
                                         disabled={actionBusy || !savedTask}
                                         onClick={() => {
                                           void runAction(
@@ -2017,6 +1959,9 @@ function App() {
                                       rows={4}
                                       placeholder="输入用于保活的短信内容"
                                     />
+                                    <p className="text-sm text-muted-foreground">
+                                      “测试短信”会使用当前填写的目标号码与短信内容立即发送一条短信，用于确认保活参数是否可用。
+                                    </p>
                                   </div>
                                 </div>
                               </div>
