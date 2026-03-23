@@ -1672,17 +1672,40 @@ def query_current_smsc(ctx: ActionContext) -> Optional[tuple[str, str]]:
     return match.group(1), match.group(2)
 
 
+def smsc_matches_target(current: Optional[tuple[str, str]], target_address: str, target_type: str) -> bool:
+    if not current:
+        return False
+    return normalize_smsc_address(current[0]) == target_address and normalize_smsc_type(current[1]) == target_type
+
+
 def apply_smsc_value(ctx: ActionContext, smsc_address: str, smsc_type: str) -> None:
     address = normalize_smsc_address(smsc_address)
     smsc_kind = normalize_smsc_type(smsc_type)
+    current_before = query_current_smsc(ctx)
+    if smsc_matches_target(current_before, address, smsc_kind):
+        ctx.log(f"当前短信中心已是目标值：{address},{smsc_kind}，跳过重复写入")
+        return
+
     ctx.log(f"准备应用短信中心：{address},{smsc_kind}")
-    run_logged_command(
+    result = run_logged_command(
         ctx,
         ["mmcli", "-m", "any", f'--command=AT+CSCA="{address}",{smsc_kind}'],
-        success_message="短信中心设置命令已下发",
-        failure_prefix="设置短信中心失败：",
+        check=False,
     )
     queried = query_current_smsc(ctx)
+    if result.returncode != 0:
+        error_text = command_output_text(result) or "未知错误"
+        if smsc_matches_target(queried, address, smsc_kind):
+            ctx.log(f"基带返回写入异常，但当前短信中心已为目标值：{address},{smsc_kind}", "warning")
+            return
+        if "Memory full" in error_text:
+            current_text = f"{queried[0]},{queried[1]}" if queried else "未知"
+            raise RuntimeError(
+                f"设置短信中心失败：基带返回 Memory full，当前短信中心为 {current_text}，目标值为 {address},{smsc_kind}"
+            )
+        raise RuntimeError(f"设置短信中心失败：{error_text}")
+
+    ctx.log("短信中心设置命令已下发")
     if queried:
         ctx.log(f"当前短信中心：{queried[0]},{queried[1]}")
     else:
