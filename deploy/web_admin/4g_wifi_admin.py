@@ -39,11 +39,15 @@ from notification_utils import (  # noqa: E402
 )
 
 
-HOST = os.environ.get("FOURG_WIFI_ADMIN_HOST", "0.0.0.0")
+ML307_MODE = os.environ.get("MODEM_BACKEND", "") == "ml307"
+ML307 = None
+FEISHU = None
+KEEPER = None
+HOST = os.environ.get("FOURG_WIFI_ADMIN_HOST", "127.0.0.1" if ML307_MODE else "0.0.0.0")
 PORT = int(os.environ.get("FOURG_WIFI_ADMIN_PORT", "8080"))
-NOTIFICATION_CONFIG_PATH = Path("/etc/sms-forwarder.conf")
+NOTIFICATION_CONFIG_PATH = Path(os.environ.get("SMS_FORWARDER_CONFIG", "/etc/sms-forwarder.conf"))
 SMS_FORWARDER_SERVICE = "sms-forwarder.service"
-APP_CONFIG_PATH = Path("/etc/esim-sms-forwarder.conf")
+APP_CONFIG_PATH = Path(os.environ.get("ESIM_FORWARDER_CONFIG", "/etc/esim-sms-forwarder.conf"))
 STATIC_DIR = Path(
     os.environ.get("FOURG_WIFI_ADMIN_STATIC_DIR", str(Path(__file__).resolve().with_name("frontend_dist")))
 )
@@ -276,7 +280,10 @@ def read_env_config(path: Path) -> dict[str, str]:
 
 def write_env_config(path: Path, config: dict[str, str]) -> None:
     lines = [f"{key}={value}" for key, value in config.items()]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    temp.replace(path)
 
 
 def app_runtime_config() -> dict[str, str]:
@@ -542,6 +549,8 @@ def parse_keepalive_task(raw_task: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_keepalive_config() -> tuple[dict[str, int], list[dict[str, Any]]]:
+    if ML307_MODE and KEEPER is not None:
+        return KEEPER.config()
     config = read_env_config(APP_CONFIG_PATH)
     raw_settings = str(config.get(KEEPALIVE_SETTINGS_KEY, "")).strip()
     raw_tasks = str(config.get(KEEPALIVE_TASKS_KEY, "")).strip()
@@ -568,6 +577,8 @@ def load_keepalive_config() -> tuple[dict[str, int], list[dict[str, Any]]]:
 
 
 def save_keepalive_config(settings: dict[str, Any], tasks: list[dict[str, Any]]) -> tuple[dict[str, int], list[dict[str, Any]]]:
+    if ML307_MODE and KEEPER is not None:
+        return KEEPER.configure(settings, tasks)
     normalized_settings = normalize_keepalive_settings(settings)
     normalized_tasks = [parse_keepalive_task(task) for task in tasks]
     config = read_env_config(APP_CONFIG_PATH)
@@ -702,13 +713,16 @@ def describe_keepalive_record(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def keepalive_status_snapshot(profiles: list[dict[str, Any]]) -> dict[str, Any]:
+    if ML307_MODE and KEEPER is not None:
+        return KEEPER.snapshot(profiles)
     now = datetime.now(BEIJING_TZ)
     settings, tasks = load_keepalive_config()
     profile_map = {str(profile.get("iccid", "")).strip(): profile for profile in profiles}
 
     task_views: list[dict[str, Any]] = []
     for task in tasks:
-        next_run = next_keepalive_run(task, now)
+        # A saved configuration must not look scheduled while ML307 sending is paused.
+        next_run = None if ML307_MODE else next_keepalive_run(task, now)
         profile = profile_map.get(task["profile_iccid"], {})
         task_views.append(
             {
@@ -750,6 +764,7 @@ def keepalive_status_snapshot(profiles: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "settings": settings,
         "tasks": task_views,
+        "scheduler_enabled": not ML307_MODE,
         "active_run": active_run,
         "queued_runs": sorted(queue_items, key=lambda item: item.get("scheduled_for", "")),
         "recent_runs": history,
@@ -913,6 +928,8 @@ def attach_profile_smsc_config(profiles: list[dict[str, Any]]) -> list[dict[str,
 
 
 def get_profiles() -> list[dict[str, Any]]:
+    if ML307_MODE:
+        return [enrich_profile(p) for p in ML307.snapshot()["profiles"]]
     result = run_command(["/usr/local/bin/lpac-switch", "list"])
     payload = parse_lpac_json(result.stdout)
     if payload.get("code") != 0:
@@ -1002,6 +1019,11 @@ def parse_sms_paths(raw: str) -> list[str]:
 
 
 def get_latest_sms_detail() -> dict[str, str]:
+    if ML307_MODE:
+        messages = ML307.store.messages(1)
+        if not messages:
+            raise RuntimeError("当前没有可重新推送的短信")
+        return messages[0]
     result = run_command(["mmcli", "-m", "any", "--messaging-list-sms"], check=False)
     if result.returncode != 0:
         raise RuntimeError(command_output_text(result) or "无法读取短信列表")
@@ -1214,6 +1236,8 @@ def notify_keepalive_result(
 
 
 def get_status(refresh_profiles: bool = False) -> dict[str, Any]:
+    if ML307_MODE:
+        return get_ml307_status(refresh_profiles)
     status_message = ""
     errors: list[str] = []
     notification_config = read_env_config(NOTIFICATION_CONFIG_PATH)
@@ -1569,6 +1593,9 @@ def save_notifications_config(ctx: ActionContext, payload: dict[str, Any]) -> No
     save_notification_targets_in_config(config, sanitized_targets)
     write_env_config(NOTIFICATION_CONFIG_PATH, config)
     ctx.log(f"通知渠道配置已写入：{'、'.join(configured_channel_labels(sanitized_targets))}")
+    if ML307_MODE:
+        ctx.log("通知配置已生效")
+        return
     run_logged_command(
         ctx,
         ["systemctl", "restart", SMS_FORWARDER_SERVICE],
@@ -1923,6 +1950,33 @@ def run_keepalive_task(ctx: ActionContext, payload: dict[str, Any]) -> None:
 
 
 def execute_action(action: str, payload: dict[str, Any], ctx: ActionContext) -> None:
+    if ML307_MODE:
+        if action == "switch_profile":
+            ML307.switch(str(payload.get("iccid", "")).strip(), ctx.log)
+        elif action == "restart_sms":
+            ML307.refresh(force_profiles=True)
+            error = ML307.snapshot()["error"]
+            if error:
+                raise RuntimeError(error)
+            ctx.log("短信接收状态已刷新")
+        elif action == "save_notifications":
+            save_notifications_config(ctx, payload)
+        elif action == "save_keepalive":
+            if KEEPER is None:
+                raise ValueError('保号服务尚未初始化')
+            tasks = payload.get("tasks", [])
+            if not isinstance(tasks, list) or any(not isinstance(task, dict) for task in tasks):
+                raise ValueError("保号任务格式不正确")
+            save_keepalive_settings(ctx, payload)
+        elif action == KEEPALIVE_ACTION_NAME:
+            if KEEPER is None or not KEEPER.can_run(str(payload.get('run_id', ''))):
+                raise ValueError('任务尚未到期或未排队')
+            KEEPER.run(str(payload.get('run_id', '')), ctx.log)
+        elif action == "resend_last_sms":
+            resend_last_sms(ctx)
+        else:
+            raise ValueError("当前设备不支持此操作")
+        return
     if action == "switch_profile":
         switch_profile(ctx, payload)
         return
@@ -1977,7 +2031,12 @@ def run_action_worker(action_id: str, action: str, payload: dict[str, Any]) -> N
         ctx.log(f"执行失败：{error_message}", "error")
 
 
-def start_action(action: str, payload: dict[str, Any], *, metadata: Optional[dict[str, Any]] = None) -> str:
+def start_action(action: str, payload: dict[str, Any], *, metadata: Optional[dict[str, Any]] = None,
+                 reject_if_busy: bool = False) -> str:
+    if ML307_MODE and action not in {"switch_profile", "restart_sms", "save_notifications", "resend_last_sms", KEEPALIVE_ACTION_NAME}:
+        raise ValueError("当前设备不支持此操作")
+    if ML307_MODE and action == KEEPALIVE_ACTION_NAME and (KEEPER is None or not KEEPER.can_run(str(payload.get('run_id', '')))):
+        raise ValueError('任务尚未到期或未排队')
     cleanup_actions()
     effective_metadata = dict(metadata or {})
     if action == KEEPALIVE_ACTION_NAME and not effective_metadata:
@@ -1997,6 +2056,8 @@ def start_action(action: str, payload: dict[str, Any], *, metadata: Optional[dic
             }
     action_id = uuid.uuid4().hex[:12]
     with ACTIONS_LOCK:
+        if reject_if_busy and any(record['state'] in {'queued', 'running'} for record in ACTIONS.values()):
+            raise ValueError('已有操作正在执行，请完成后再试')
         ACTIONS[action_id] = {
             "id": action_id,
             "action": action,
@@ -2243,6 +2304,10 @@ class AppHandler(BaseHTTPRequestHandler):
         self._write_json(404, {"error": "Not found"})
 
     def do_POST(self) -> None:
+        origin = self.headers.get("Origin")
+        if ML307_MODE and origin and urlparse(origin).netloc != self.headers.get("Host"):
+            self._write_json(403, {"error": "拒绝跨站操作"})
+            return
         path = urlparse(self.path).path
         try:
             data = self._read_json_body()
@@ -2284,7 +2349,80 @@ class AppHandler(BaseHTTPRequestHandler):
             self._write_json(500, {"error": str(exc)})
 
 
+def get_ml307_status(refresh_profiles: bool = False) -> dict[str, Any]:
+    if refresh_profiles:
+        ML307.refresh(force_profiles=True)
+    snapshot = ML307.snapshot()
+    profiles = [enrich_profile(p) for p in snapshot["profiles"]]
+    targets = load_notification_targets(read_env_config(NOTIFICATION_CONFIG_PATH))
+    configured = configured_notification_targets(targets)
+    messages = snapshot["sms"]
+    for message in messages:
+        # Some roaming SMSCs report an inaccurate timezone. Keep that raw timestamp
+        # in SQLite and show our observed arrival time for newly received messages.
+        message["smsc_timestamp"] = message["timestamp"]
+        message["timestamp"] = format_beijing_timestamp(
+            message["timestamp"] if message["imported"] else message["received_at"]
+        ) + ("（短信网络时间）" if message["imported"] else "（本机接收）")
+    return {
+        "profiles": profiles,
+        "capabilities": {"sim_type": "esim", "esim_management_enabled": True,
+                         "lpac_installed": False, "direct_modem": True, "sms_send_enabled": False,
+                         "scheduled_sms_enabled": KEEPER is not None},
+        "modem_available": not snapshot["error"],
+        "status_message": "正在切卡并等待网络注册" if snapshot["busy"] else snapshot["error"],
+        "errors": [s for s in (snapshot["error"], snapshot["notify_error"]) if s],
+        "modem": snapshot["modem"],
+        "connection": {"apn":"", "username":"", "password":"", "ip_type":"", "network_id":""},
+        "services": {"modemmanager":"active" if not snapshot["error"] else "inactive",
+                     "sms_forwarder":"active", "web_admin":"active"},
+        "notifications": {"configured_count":len(configured),
+                          "configured_labels":configured_channel_labels(configured), "targets":targets},
+        "feishu": FEISHU.snapshot() if FEISHU else {"configured": False},
+        "keepalive": keepalive_status_snapshot(profiles),
+        "sms": messages,
+        "timestamp": format_beijing_timestamp(snapshot["updated"] or datetime.now(timezone.utc).isoformat()),
+    }
+
+
 def main() -> None:
+    global ML307, FEISHU, KEEPER
+    # Reject a second instance before it can touch the shared modem.
+    server = ThreadingHTTPServer((HOST, PORT), AppHandler)
+    if ML307_MODE:
+        from ml307_backend import ML307Backend
+
+        def configured_targets():
+            return configured_notification_targets(load_notification_targets(read_env_config(NOTIFICATION_CONFIG_PATH)))
+
+        def notify_one(target, message):
+            detail = dict(message, state="received", timestamp=format_beijing_timestamp(message["received_at"]))
+            title, body = format_sms_notification(detail)
+            label = message.get("profile_name")
+            if label:
+                title = f"{label} · {title}"
+            send_apprise_notification([target], title, body)
+
+        ML307 = ML307Backend(os.environ.get("ML307_PORT", "COM4" if os.name == "nt" else "usb"),
+                            os.environ.get("ML307_DATA_DIR", str(APP_CONFIG_PATH.parent)),
+                            configured_targets, notify_one)
+        from keepalive_interval import IntervalKeepalive
+
+        def enqueue_interval(task, run_id):
+            return start_action(KEEPALIVE_ACTION_NAME, {'run_id':run_id},
+                                metadata={'kind':'keepalive', 'task_id':task['id'], 'label':task['label']},
+                                reject_if_busy=True)
+
+        def interval_notice(body, key):
+            if FEISHU is None or not FEISHU.snapshot().get('bound'):
+                return False
+            FEISHU.text(body, key=key)
+            return True
+
+        KEEPER = IntervalKeepalive(Path(os.environ.get('ML307_DATA_DIR', str(APP_CONFIG_PATH.parent))) / 'keepalive.sqlite3',
+                                   ML307, enqueue_interval, interval_notice)
+        ML307.refresh(force_profiles=True)
+        ML307.start()
     if esim_management_enabled():
         try:
             refresh_profile_cache(force=True)
@@ -2294,10 +2432,30 @@ def main() -> None:
     else:
         print("eSIM management disabled for physical SIM mode")
     threading.Thread(target=action_queue_worker, daemon=True).start()
-    threading.Thread(target=keepalive_scheduler, daemon=True).start()
-    server = ThreadingHTTPServer((HOST, PORT), AppHandler)
+    feishu_config = Path(os.environ.get('FEISHU_CONFIG', str(APP_CONFIG_PATH.parent / 'feishu.json')))
+    if ML307_MODE and feishu_config.exists():
+        try:
+            from feishu_bot import FeishuBot
+            FEISHU = FeishuBot(feishu_config, ML307.store, get_ml307_status, start_action, get_action_snapshot)
+            FEISHU.start()
+            print('Feishu bot initialized')
+        except Exception:
+            print('Feishu bot configuration failed; modem service remains available')
+    if not ML307_MODE:
+        threading.Thread(target=keepalive_scheduler, daemon=True).start()
+    else:
+        KEEPER.start()
     print(f"4G WiFi admin listening on http://{HOST}:{PORT}")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        if KEEPER is not None:
+            KEEPER.stop.set()
+        if FEISHU is not None:
+            FEISHU.close()
+        if ML307 is not None:
+            ML307.close()
+        server.server_close()
 
 
 if __name__ == "__main__":

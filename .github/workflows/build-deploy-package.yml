@@ -1,14 +1,10 @@
-name: Build Deploy Package
+name: Legacy Debian package (manual)
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -89,37 +85,3 @@ jobs:
             dist/lpac-assets.json
             dist/lpac-linux-*.zip
           if-no-files-found: error
-
-      - name: Publish release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: 自动构建 ${{ steps.version.outputs.tag }}
-          body: |
-            ## 更新内容
-
-            - 自动构建时间：${{ steps.version.outputs.build_time }}（Asia/Shanghai）
-            - 提交版本：`${{ github.sha }}`
-            - 包含最新前端构建、Web 管理服务、短信转发服务
-            - 包含 Debian 一键安装脚本与环境检查
-            - 安装脚本会根据架构、系统版本、glibc 自动匹配并下载对应的 lpac 资产
-            - 如仓库中存在多个 `lpac-linux-*.zip`，本次 release 会一并发布并生成 `lpac-assets.json`
-
-            ## 安装命令
-
-            ```bash
-            curl -fsSL https://raw.githubusercontent.com/cyDione/eSIM-SMS-Forwarder/main/scripts/install_latest.sh | sudo sh
-            ```
-
-            ## 资产说明
-
-            - `eSIM-SMS-Forwarder-deploy.zip`
-            - `lpac-assets.json`
-            - `lpac-linux-*.zip`（如有）
-          files: |
-            dist/eSIM-SMS-Forwarder-deploy-${{ steps.version.outputs.tag }}.zip
-            dist/eSIM-SMS-Forwarder-deploy.zip
-            dist/lpac-assets.json
-            dist/lpac-linux-*.zip
-          fail_on_unmatched_files: false

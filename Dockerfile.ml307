@@ -1,0 +1,29 @@
+ARG PYTHON_IMAGE=python:3.12-slim
+FROM ${PYTHON_IMAGE}
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    TZ=Asia/Shanghai \
+    MODEM_BACKEND=ml307 \
+    ML307_PORT=usb \
+    ML307_DATA_DIR=/data \
+    SMS_FORWARDER_CONFIG=/data/notifications.conf \
+    ESIM_FORWARDER_CONFIG=/data/app.conf \
+    FOURG_WIFI_ADMIN_HOST=0.0.0.0 \
+    FOURG_WIFI_ADMIN_PORT=8080 \
+    FOURG_WIFI_ADMIN_STATIC_DIR=/app/frontend/dist
+
+WORKDIR /app
+# The deployment bundle includes Linux wheels, so NAS builds need no Internet.
+COPY requirements-ml307.txt /app/requirements-ml307.txt
+COPY wheels /wheels
+RUN pip install --no-cache-dir --disable-pip-version-check --no-index --find-links=/wheels -r requirements-ml307.txt
+COPY deploy/shared /app/deploy/shared
+COPY deploy/web_admin/4g_wifi_admin.py /app/deploy/web_admin/4g_wifi_admin.py
+COPY deploy/container/healthcheck.py /app/deploy/container/healthcheck.py
+COPY frontend/dist /app/frontend/dist
+
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD ["python", "/app/deploy/container/healthcheck.py"]
+CMD ["python", "-B", "-u", "/app/deploy/web_admin/4g_wifi_admin.py"]

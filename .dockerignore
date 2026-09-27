@@ -1,0 +1,14 @@
+.git
+.localdata
+.venv
+.env
+data
+tests
+frontend/node_modules
+**/__pycache__
+**/*.pyc
+**/*.sqlite3
+**/*.sqlite3-*
+**/*.log
+**/*.tar.gz
+**/*.zip

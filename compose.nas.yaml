@@ -1,0 +1,32 @@
+services:
+  esim-sms-forwarder:
+    image: esim-sms-forwarder:ml307-nas
+    container_name: esim-sms-forwarder
+    build:
+      context: .
+      dockerfile: Dockerfile.ml307
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12-slim}
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${NAS_BIND_IP:?Set NAS_BIND_IP in .env}:${WEB_PORT:-18081}:8080"
+    volumes:
+      - ./data:/data
+      # The host creates USB nodes after a replug; remap the bus directory, not one devnum.
+      - /dev/bus/usb:/dev/bus/usb
+    device_cgroup_rules:
+      - "c 189:* rw"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"

@@ -1,252 +1,57 @@
-# eSIM SMS Forwarder
+# ML307C 9eSIM Manager
 
-[![Build Deploy Package](https://github.com/cyDione/eSIM-SMS-Forwarder/actions/workflows/build-deploy-package.yml/badge.svg)](https://github.com/cyDione/eSIM-SMS-Forwarder/actions/workflows/build-deploy-package.yml)
-[![Latest Release](https://img.shields.io/github/v/release/cyDione/eSIM-SMS-Forwarder?display_name=tag)](https://github.com/cyDione/eSIM-SMS-Forwarder/releases/latest)
+运行在群晖 NAS 或 Windows 上的个人短信管理工具：接收短信、通过飞书通知、远程切换 9eSIM 中已有的卡，以及按间隔发送保号短信。
 
-一个运行在 Debian 设备上的轻量服务，用来做 eSIM 管理、短信接收、Apprise 多渠道转发，以及浏览器里的可视化控制台。
+基于 [cyDione/eSIM-SMS-Forwarder](https://github.com/cyDione/eSIM-SMS-Forwarder) 开发，保留原作者的 MIT 许可证。ML307C 使用新增的 AT/APDU 适配层；原来的 ModemManager / QMI / lpac 路径仍保留，说明见 [上游项目文档](README-UPSTREAM.md)。
 
-项目目标很直接：
+## 已有功能
 
-- 在支持 eUICC 的设备上切换内置 eSIM Profile
-- 接收短信并转发到 Apprise 多渠道
-- 提供低负载、可实时反馈执行进度的 Web 管理页面
-- 兼容普通 SIM 场景，只启用短信转发，不安装 `lpac`
+- 读取 9eSIM 配置并切卡，确认卡片启用状态、等待网络注册。
+- 接收 GSM 7-bit / UCS2 短信，合并长短信，SQLite 保存与去重。
+- 显示当前驻网运营商、漫游状态、LTE 信号及原始测量值。
+- 网页收件箱、搜索、卡片筛选、复制短信、自动刷新和操作日志。
+- 飞书个人机器人：短信通知、状态查询、点击卡片切号。NAS 使用出站长连接，无需公网回调地址。
+- 保号任务：首次等待 N 天，此后每次短信提交成功后 M 天；到期切卡发送，再恢复原卡；失败或结果不明时暂停并通知。
+- Apprise 通知渠道配置与最近短信重推。
 
-## 功能描述
+## 开始使用
 
-### eSIM 管理
+| 环境 | 说明 |
+| --- | --- |
+| 群晖 / Linux Docker | [部署、备份和更新](DEPLOY-NAS.md) |
+| Windows USB 串口 | [ML307C 适配与本地启动](README-ML307C.md) |
+| 飞书自建应用 | [权限、长连接与个人绑定](FEISHU.md) |
 
-- 读取 eUICC 内置 Profiles
-- 一键切换当前启用的 eSIM Profile
-- 切卡后自动执行基带恢复，帮助重新注册网络
-- 支持为 Profile 关联短信中心，切卡后自动恢复对应 SMSC
-- 支持按 cron 表达式执行保活任务，自动切换指定 Profile、发送短信并回切原 Profile
-- Web 页面显示执行进度和 Shell 日志
+ML307 适配已在一台 x86_64、DSM 7.2.1 的 NAS 上验证接收、切卡、驻网及飞书通知。Linux 使用 usbfs 访问 ML307 的 AT 接口；Windows 使用已安装驱动提供的串口。不同固件、USB 接口布局和 NAS 平台需要单独验证。
 
-### 短信转发
+首次部署不会创建保号任务。请在网页中填写自己的卡片、收件号码、起算日期和短信内容，再开启。程序不会查询运营商账户余额或认定号码已经完成保号。
 
-- 通过 `ModemManager` 读取短信
-- 自动转发新短信到 Apprise 渠道
-- 自动处理中文转义内容
-- 自动尝试解码 Base64 短信正文
-- 支持在页面里查看最近短信
-- 支持在保活任务里按当前号码与短信内容测试发送
-- 支持“重发最后一条短信”
+## 当前边界
 
-### 设备控制
+- 一次只能启用一张 eSIM，停用的卡不能同时实时收信。
+- 支持已有配置间切换，尚不支持下载、删除 eSIM 配置。
+- 保号调度、恢复和异常处理已有模拟测试；**真实出站计费短信尚未完成实机验收**。模组确认提交不等于对端收到或运营商确认计费。
+- 365 天未收到验证码的提醒尚未实现。
+- 网页目前没有登录功能，只应绑定可信内网地址。远程操作使用已绑定个人身份的飞书机器人，不要直接把网页端口开放到公网。
+- 不自动删除模组内的短信；长期使用需要关注设备存储空间。
 
-- 查看运营商、注册状态、信号强度、接入制式
-- 重启基带
-- 重启短信转发服务
-- 配置 APN、网络制式、手动选网
-- 维护保活任务、切卡缓冲时间、执行队列与最近记录
-- 在高级设置里维护通知渠道
+## 开发与检查
 
-### Web 控制台
+需要 Python 3.12 和 Node.js 22。测试不连接真实模组，不发送短信。
 
-- React + shadcn/ui 动态前端
-- 点击任意操作后立即进入任务态
-- Shell 面板实时显示执行步骤
-- 前后端由同一个 Python 服务托管
-- 普通 SIM 模式下自动禁用 eSIM 相关功能
-
-## 技术栈
-
-### 设备侧
-
-- Debian
-- Python 3
-- systemd
-- ModemManager / `mmcli`
-- libqmi / `qmicli`
-- NetworkManager / `nmcli`
-- `lpac`
-
-### 前端
-
-- React 19
-- TypeScript
-- Vite
-- Tailwind CSS v4
-- shadcn/ui
-- sonner
-- lucide-react
-
-## 安装说明
-
-### 1. 一键安装
-
-默认安装模式为 eSIM 模式：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/cyDione/eSIM-SMS-Forwarder/main/scripts/install_latest.sh | sudo sh
-```
-
-如果设备使用普通 SIM，只需要短信转发，不需要 `lpac` 和 eSIM 管理：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/cyDione/eSIM-SMS-Forwarder/main/scripts/install_latest.sh | sudo sh -s -- --sim-type physical
-```
-
-安装脚本会自动：
-
-- 检查系统环境、架构、systemd 和基础依赖
-- 下载最新 Release，失败时回退到 `main` 分支源码包
-- 安装常用依赖：`python3`、`curl`、`unzip`、`modemmanager`、`network-manager`、`libqmi-utils`
-- 在 `aarch64 / arm64` 的 eSIM 模式下自动安装内置 `lpac`
-- 安装并启用 Web 管理服务与短信转发服务
-- 输出访问地址、服务状态和通知渠道摘要
-
-### 2. 安装模式
-
-#### eSIM 模式
-
-- 参数：`--sim-type esim`
-- 默认模式
-- 安装 `lpac`
-- 启用 eSIM 卡切换能力
-- Web 前端显示 eSIM Profiles 和切卡按钮
-
-#### 普通 SIM 模式
-
-- 参数：`--sim-type physical`
-- 不安装 `lpac`
-- 删除 `lpac-switch` 包装脚本
-- 后端禁用 eSIM Profile 读取与切卡接口
-- Web 前端自动隐藏/禁用 eSIM 相关操作
-
-安装完成后会写入：
-
-```text
-/etc/esim-sms-forwarder.conf
-```
-
-示例内容：
-
-```ini
-SIM_TYPE=physical
-ESIM_MANAGEMENT_ENABLED=0
-```
-
-### 3. 手动部署
-
-```bash
-git clone https://github.com/cyDione/eSIM-SMS-Forwarder.git
-cd eSIM-SMS-Forwarder
-sudo sh ./deploy/install.sh
-```
-
-普通 SIM 模式：
-
-```bash
-sudo sh ./deploy/install.sh --sim-type physical
-```
-
-## 使用说明
-
-### 通知渠道配置
-
-实际配置文件路径：
-
-```text
-/etc/sms-forwarder.conf
-```
-
-至少需要填写：
-
-```ini
-MODEM_ID=any
-NOTIFICATION_TARGETS_JSON=[{"id":"bark-primary","label":"Bark","url":"barks://bark.example.com/device_key?group=sms&level=active","enabled":true}]
-FORWARD_SMS_STATES=received
-```
-
-`NOTIFICATION_TARGETS_JSON` 使用 Apprise URL 格式，可以同时配置多个渠道。
-
-### 服务管理
-
-```bash
-systemctl status 4g-wifi-admin.service
-systemctl status sms-forwarder.service
-```
-
-```bash
-journalctl -u 4g-wifi-admin.service -f
-journalctl -u sms-forwarder.service -f
-```
-
-### Web 页面
-
-默认监听端口：
-
-```text
-http://<device-ip>:8080/
-```
-
-页面内可完成：
-
-- 查看当前号码、运营商、信号和服务状态
-- 查看最近短信
-- 为 Profile 配置并应用短信中心，切卡后自动恢复
-- 重发最后一条短信
-- 重启基带
-- 配置保活任务，按时自动切卡、发短信、通知并切回原 Profile
-- 在保活任务里测试当前短信配置，确认发送链路
-- 修改通知渠道配置
-- 修改 APN、网络制式和选网策略
-- 在 eSIM 模式下切换 Profile
-
-## 构建说明
-
-### 前端开发
-
-```bash
+```sh
+python -m pip install -r requirements-ml307.txt
+python -B -m unittest discover -s tests -v
 cd frontend
-npm install
-npm run dev
-```
-
-### 前端构建
-
-```bash
-cd frontend
+npm ci
 npm run lint
 npm run build
 ```
 
-### Python 语法检查
+`.github/workflows/check-ml307.yml` 在推送时运行后端测试、前端检查和容器构建，不会自动发布 Release 或部署到 NAS。上游 Debian 安装包工作流仅允许手动执行，不适用于 ML307 部署。
 
-```bash
-python -m py_compile deploy/web_admin/4g_wifi_admin.py
-python -m py_compile deploy/sms_forwarder/sms_forwarder.py
-```
+## 数据与许可证
 
-## 目录结构
+短信、任务、通知凭据和飞书绑定均保存在运行时数据目录。`.localdata/`、`data/`、`.env`、数据库、日志及本地打包文件不提交到 Git；仓库只包含程序、测试和配置示例。
 
-```text
-deploy/
-  esim/
-    lpac-switch.sh
-    lpac
-  sms_forwarder/
-    sms_forwarder.py
-    sms-forwarder.service
-    sms-forwarder.conf.example
-  web_admin/
-    4g_wifi_admin.py
-    4g-wifi-admin.service
-    frontend_dist/
-
-frontend/
-  src/
-```
-
-## 说明
-
-这个项目优先解决的是“稳定可用”，而不是“大而全”。重点是：
-
-- 切卡动作有明确反馈
-- 短信链路可追踪
-- 低内存设备也能长期运行
-- 页面操作有实时响应
-
-如果你只需要保号收短信，推荐普通 SIM 模式；如果你需要切换 eSIM Profile，再使用默认 eSIM 模式即可。
+[MIT License](LICENSE) · [原项目](https://github.com/cyDione/eSIM-SMS-Forwarder)

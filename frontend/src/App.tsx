@@ -17,6 +17,7 @@ import {
   RadioTowerIcon,
   RefreshCwIcon,
   RouterIcon,
+  SaveIcon,
   SendIcon,
   Settings2Icon,
   ShieldAlertIcon,
@@ -56,8 +57,10 @@ import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
+import { ReceiverView } from "./ReceiverView"
+import { KeepalivePanel } from "./KeepalivePanel"
 
-type Profile = {
+export type Profile = {
   iccid: string
   display_name: string
   provider_name?: string
@@ -68,21 +71,27 @@ type Profile = {
   smsc_type?: string
 }
 
-type SmsItem = {
+export type SmsItem = {
   id: string
   number: string
   text: string
   timestamp: string
   state: string
   state_label: string
+  profile_name?: string
+  imported?: number
+  received_at?: string
+  smsc_timestamp?: string
 }
 
-type StatusData = {
+export type StatusData = {
   profiles: Profile[]
   capabilities: {
     sim_type: string
     esim_management_enabled: boolean
     lpac_installed: boolean
+    direct_modem?: boolean
+    sms_send_enabled?: boolean
   }
   modem_available: boolean
   status_message: string
@@ -94,6 +103,12 @@ type StatusData = {
     registration: string
     state: string
     signal: string
+    signal_details?: {
+      csq: number | null
+      rssi_text: string | null
+      rsrp_text: string | null
+      rsrq_text: string | null
+    }
     access_tech: string
     current_modes: string
     apn: string
@@ -117,6 +132,7 @@ type StatusData = {
     targets: NotificationTarget[]
   }
   keepalive?: {
+    scheduler_enabled?: boolean
     settings: KeepaliveSettings
     tasks: KeepaliveTask[]
     active_run: KeepaliveRun | null
@@ -128,7 +144,7 @@ type StatusData = {
   timestamp: string
 }
 
-type KeepaliveSettings = {
+export type KeepaliveSettings = {
   queue_gap_seconds: number
 }
 
@@ -144,6 +160,14 @@ type KeepaliveTask = {
   schedule_label: string
   next_run: string
   next_run_label: string
+  schedule_type?: string
+  start_date?: string
+  send_time?: string
+  first_delay_days?: number
+  interval_days?: number
+  last_success?: string
+  runtime_state?: string
+  error?: string
 }
 
 type KeepaliveRun = {
@@ -171,7 +195,7 @@ type NotificationTarget = {
   type: string
 }
 
-type ChannelKind = "bark" | "telegram" | "gotify" | "ntfy" | "discord" | "custom"
+type ChannelKind = "bark" | "telegram" | "gotify" | "ntfy" | "discord" | "pushplus" | "custom"
 
 type NotificationChannelField = {
   key: string
@@ -192,7 +216,7 @@ type NotificationChannelDefinition = {
 
 type ActionLevel = "info" | "warning" | "error" | "command"
 
-type ActionEvent = {
+export type ActionEvent = {
   time: string
   level: ActionLevel
   message: string
@@ -252,7 +276,7 @@ type ProfileSmscFormState = {
   type: string
 }
 
-type KeepaliveFormTask = {
+export type KeepaliveFormTask = {
   id: string
   label: string
   enabled: boolean
@@ -260,6 +284,11 @@ type KeepaliveFormTask = {
   target_number: string
   message: string
   cron_expression: string
+  schedule_type?: string
+  start_date?: string
+  send_time?: string
+  first_delay_days?: number
+  interval_days?: number
 }
 
 const ACTIVE_ACTION_KEY = "ess-active-action"
@@ -360,6 +389,13 @@ function signalVariant(signalValue: string) {
 }
 
 const NOTIFICATION_CHANNEL_DEFINITIONS: Record<ChannelKind, NotificationChannelDefinition> = {
+  pushplus: {
+    type: "pushplus",
+    label: "微信 PushPlus",
+    description: "关注并绑定 PushPlus 微信公众号后，填写个人 Token。",
+    fields: [{ key: "token", label: "PushPlus Token", placeholder: "输入个人 Token", required: true, inputType: "password" }],
+    createValues: () => ({ token: "" }),
+  },
   bark: {
     type: "bark",
     label: "Bark",
@@ -457,13 +493,14 @@ const NOTIFICATION_CHANNEL_DEFINITIONS: Record<ChannelKind, NotificationChannelD
   },
 }
 
-const NOTIFICATION_CHANNEL_ORDER: ChannelKind[] = ["bark", "telegram", "gotify", "ntfy", "discord", "custom"]
+const NOTIFICATION_CHANNEL_ORDER: ChannelKind[] = ["pushplus", "bark", "telegram", "gotify", "ntfy", "discord", "custom"]
 
 const ICON_VERSION = "20260312-2"
 const DEFAULT_BARK_ICON_URL =
   `https://raw.githubusercontent.com/cyDione/eSIM-SMS-Forwarder/main/frontend/public/app-icon.png?v=${ICON_VERSION}`
 
 const NOTIFICATION_CHANNEL_ALIASES: Record<string, ChannelKind> = {
+  pushplus: "pushplus",
   bark: "bark",
   barks: "bark",
   telegram: "telegram",
@@ -526,6 +563,8 @@ function createNotificationTarget(type: ChannelKind, overrides: Partial<Notifica
 function buildNotificationUrl(target: NotificationFormTarget) {
   const values = target.values
   switch (target.type) {
+    case "pushplus":
+      return values.token?.trim() ? `pushplus://${values.token.trim()}` : ""
     case "bark": {
       const server = normalizeServerUrl(values.server_url ?? "")
       if (!server) return ""
@@ -584,6 +623,11 @@ function parseNotificationTarget(target: NotificationTarget): NotificationFormTa
   const enabled = target.enabled ?? true
   const id = target.id
   const url = target.url ?? ""
+
+  if (type === "pushplus") {
+    const token = url.trim().match(/^pushplus:\/\/([^/?#]+)/i)?.[1] ?? ""
+    return createNotificationTarget("pushplus", { id, enabled, values: { token } })
+  }
 
   if (type === "bark") {
     const parsed = convertCustomSchemeUrl(url, "barks", "bark")
@@ -730,6 +774,7 @@ function normalizeKeepaliveTasks(tasks: KeepaliveTask[] = []): KeepaliveFormTask
     target_number: task.target_number,
     message: task.message,
     cron_expression: task.cron_expression,
+    ...(task.schedule_type === "interval" ? { schedule_type: task.schedule_type, start_date: task.start_date, send_time: task.send_time, first_delay_days: task.first_delay_days, interval_days: task.interval_days } : {}),
   }))
 }
 
@@ -824,11 +869,19 @@ function App() {
   const [logs, setLogs] = useState<ActionEvent[]>([])
   const [isLoadingStatus, setIsLoadingStatus] = useState(true)
   const [isRefreshing, setIsRefreshing] = useState(false)
-  const [autoRefresh, setAutoRefresh] = useState(true)
+  const [autoRefresh, setAutoRefresh] = useState(() => {
+    try { return window.localStorage.getItem("esmf-auto-refresh") !== "false" } catch { return true }
+  })
+  const [refreshSeconds, setRefreshSeconds] = useState(() => {
+    try {
+      const saved = Number(window.localStorage.getItem("esmf-refresh-seconds"))
+      return [5, 10, 30, 60].includes(saved) ? saved : 10
+    } catch { return 10 }
+  })
   const [activeAction, setActiveAction] = useState<PersistedAction | null>(null)
   const [submittingActionLabel, setSubmittingActionLabel] = useState<string | null>(null)
   const [notificationTargets, setNotificationTargets] = useState<NotificationFormTarget[]>([])
-  const [newNotificationType, setNewNotificationType] = useState<ChannelKind>("bark")
+  const [newNotificationType, setNewNotificationType] = useState<ChannelKind>("pushplus")
   const [keepaliveSettings, setKeepaliveSettings] = useState<KeepaliveSettings>({ queue_gap_seconds: 180 })
   const [keepaliveTasks, setKeepaliveTasks] = useState<KeepaliveFormTask[]>([])
   const [expandedKeepaliveTaskId, setExpandedKeepaliveTaskId] = useState<string | null>(null)
@@ -1084,19 +1137,19 @@ function App() {
     try {
       const payloadTasks = keepaliveTasks.map((task, index) => {
         if (!task.label.trim()) {
-          throw new Error(`第 ${index + 1} 条保活任务缺少名称`)
+          throw new Error(`第 ${index + 1} 条保号任务缺少名称`)
         }
         if (!task.profile_iccid.trim()) {
-          throw new Error(`保活任务 ${task.label} 缺少 Profile`)
+          throw new Error(`保号任务 ${task.label} 缺少 Profile`)
         }
-        if (!task.target_number.trim()) {
-          throw new Error(`保活任务 ${task.label} 缺少目标手机号`)
+        if (!task.target_number.trim() && (task.enabled || task.schedule_type !== "interval")) {
+          throw new Error(`保号任务 ${task.label} 缺少目标手机号`)
         }
         if (!task.message.trim()) {
-          throw new Error(`保活任务 ${task.label} 缺少短信内容`)
+          throw new Error(`保号任务 ${task.label} 缺少短信内容`)
         }
-        if (task.cron_expression.trim().split(/\s+/).length !== 5) {
-          throw new Error(`保活任务 ${task.label} 的 cron 表达式必须是 5 段`)
+        if (task.schedule_type !== "interval" && task.cron_expression.trim().split(/\s+/).length !== 5) {
+          throw new Error(`保号任务 ${task.label} 的 cron 表达式必须是 5 段`)
         }
         return {
           id: task.id,
@@ -1106,14 +1159,15 @@ function App() {
           target_number: task.target_number.trim(),
           message: task.message,
           cron_expression: task.cron_expression.trim(),
+          ...(task.schedule_type === "interval" ? { schedule_type: task.schedule_type, start_date: task.start_date, send_time: task.send_time, first_delay_days: task.first_delay_days, interval_days: task.interval_days } : {}),
         }
       })
 
-      setSubmittingActionLabel("保存保活配置")
+      setSubmittingActionLabel("保存保号配置")
       appendLog({
         time: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
         level: "info",
-        message: `准备执行：保存保活配置（${payloadTasks.length} 条）`,
+        message: `准备执行：保存保号配置（${payloadTasks.length} 条）`,
       })
 
       const response = await requestJson<{ ok: boolean; status?: StatusData }>("/api/keepalive", {
@@ -1137,12 +1191,12 @@ function App() {
       appendLog({
         time: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
         level: "info",
-        message: "保活配置已保存",
+        message: "保号配置已保存",
       })
-      toast.success("保活配置已保存")
+      toast.success("保号配置已保存")
     } catch (error) {
       setSubmittingActionLabel(null)
-      const message = error instanceof Error ? error.message : "保存保活配置失败"
+      const message = error instanceof Error ? error.message : "保存保号配置失败"
       appendLog({
         time: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
         level: "error",
@@ -1220,11 +1274,18 @@ function App() {
     const intervalId = window.setInterval(() => {
       if (!autoRefresh || activeAction) return
       void refreshStatus(true)
-    }, 10000)
+    }, refreshSeconds * 1000)
     return () => {
       window.clearInterval(intervalId)
     }
-  }, [activeAction, autoRefresh, refreshStatus])
+  }, [activeAction, autoRefresh, refreshSeconds, refreshStatus])
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("esmf-auto-refresh", String(autoRefresh))
+      window.localStorage.setItem("esmf-refresh-seconds", String(refreshSeconds))
+    } catch { /* Settings remain usable when browser storage is unavailable. */ }
+  }, [autoRefresh, refreshSeconds])
 
   useEffect(() => {
     return () => {
@@ -1245,10 +1306,22 @@ function App() {
 
   const activeProfile = getActiveProfile(status?.profiles ?? [])
   const esimEnabled = status?.capabilities.esim_management_enabled ?? true
+  const directModem = status?.capabilities.direct_modem ?? false
   const activeProfileLabel = esimEnabled ? activeProfile?.display_name || "未检测到" : "普通 SIM"
   const activeProfileHint = esimEnabled
     ? `手机号：${status?.modem.number || "--"}`
     : `手机号：${status?.modem.number || "--"}`
+  const radioSignal = status?.modem.signal_details
+  const signalValue = directModem
+    ? radioSignal?.rsrp_text || radioSignal?.rssi_text || "暂未测得"
+    : `${status?.modem.signal || "--"}%`
+  const signalHint = directModem
+    ? [
+        `RSRQ：${radioSignal?.rsrq_text || "暂未测得"}`,
+        `RSSI：${radioSignal?.rssi_text || "暂未测得"} · CSQ ${radioSignal?.csq ?? "--"}/31`,
+        `${formatAccessTech(status?.modem.access_tech || "--")} · RSRP 为参考信号功率`,
+      ].join("\n")
+    : `${formatAccessTech(status?.modem.access_tech || "--")}\n${formatCurrentModes(status?.modem.current_modes || "--")}`
   const profileCountLabel = esimEnabled ? `${status?.profiles.length ?? 0} 个` : "已禁用"
   const notifications = getNotifications(status)
   const keepalive = getKeepalive(status)
@@ -1261,10 +1334,10 @@ function App() {
   const availableNotificationTypes = NOTIFICATION_CHANNEL_ORDER.filter((type) => !configuredNotificationTypes.has(type))
 
   useEffect(() => {
-    if (shellActionLabel) {
+    if (shellActionLabel && !directModem) {
       setShellPanelOpen(true)
     }
-  }, [shellActionLabel])
+  }, [shellActionLabel, directModem])
 
   useEffect(() => {
     if (!expandedKeepaliveTaskId) return
@@ -1279,6 +1352,249 @@ function App() {
       setExpandedProfileIccid(null)
     }
   }, [expandedProfileIccid, status?.profiles])
+
+
+  const notificationEditor = (
+    <div className={directModem ? "space-y-5" : "rounded-2xl border border-border/70 bg-background/70 p-4"}>
+      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        {!directModem ? (
+        <div className="flex items-center gap-2">
+          <SendIcon className="text-muted-foreground" />
+          <div>
+            <h3 className="font-medium">通知渠道配置</h3>
+            <p className="text-sm text-muted-foreground">
+              先选择渠道类型再添加，每种渠道只保留一份，表单会按渠道类型显示对应字段。
+            </p>
+          </div>
+        </div>
+        ) : null}
+        <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center">
+          <Select
+            value={newNotificationType}
+            onValueChange={(value) => {
+              setNewNotificationType(value as ChannelKind)
+            }}
+            disabled={actionBusy || !availableNotificationTypes.length}
+          >
+            <SelectTrigger aria-label="通知渠道类型" className={directModem ? "w-full sm:w-64" : "w-full"}>
+              <SelectValue placeholder="选择通知渠道">{NOTIFICATION_CHANNEL_DEFINITIONS[newNotificationType].label}</SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectLabel>可添加渠道</SelectLabel>
+                {availableNotificationTypes.map((type) => (
+                  <SelectItem key={type} value={type}>
+                    {NOTIFICATION_CHANNEL_DEFINITIONS[type].label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={actionBusy || !availableNotificationTypes.length}
+            onClick={() => {
+              notificationsDirtyRef.current = true
+              setNotificationTargets((current) => {
+                if (current.some((item) => item.type === newNotificationType)) return current
+                const next = [...current, createNotificationTarget(newNotificationType)]
+                return next.sort(
+                  (left, right) =>
+                    NOTIFICATION_CHANNEL_ORDER.indexOf(left.type) -
+                    NOTIFICATION_CHANNEL_ORDER.indexOf(right.type),
+                )
+              })
+            }}
+          >
+            <PlusIcon data-icon="inline-start" />
+            添加渠道
+          </Button>
+        </div>
+      </div>
+      <div className="flex flex-col gap-4">
+        {notificationTargets.length ? (
+          notificationTargets.map((target) => {
+            const definition = NOTIFICATION_CHANNEL_DEFINITIONS[target.type]
+            return (
+            <div key={target.id} className="rounded-lg border bg-card p-4">
+              <div className="flex flex-col gap-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex flex-col gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium">{definition.label}</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground">{definition.description}</p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <span>启用转发</span>
+                      <Switch
+                        checked={target.enabled}
+                        onCheckedChange={(checked) => {
+                          notificationsDirtyRef.current = true
+                          setNotificationTargets((current) =>
+                            current.map((item) => (item.id === target.id ? { ...item, enabled: checked } : item)),
+                          )
+                        }}
+                        aria-label={`切换 ${definition.label} 启用状态`}
+                      />
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={actionBusy}
+                      onClick={() => {
+                        notificationsDirtyRef.current = true
+                        setNotificationTargets((current) =>
+                          current.filter((item) => item.id !== target.id),
+                        )
+                      }}
+                    >
+                      <Trash2Icon data-icon="inline-start" />
+                      删除
+                    </Button>
+                  </div>
+                </div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  {definition.fields.map((field) => (
+                    <div key={`${target.id}-${field.key}`} className="grid gap-2">
+                      <Label htmlFor={`notification-${target.id}-${field.key}`}>
+                        {field.label}
+                      </Label>
+                      {field.options ? (
+                        <Select
+                          value={notificationFieldValue(target, field.key)}
+                          onValueChange={(value) => {
+                            const nextValue = value ?? ""
+                            notificationsDirtyRef.current = true
+                            setNotificationTargets((current) =>
+                              current.map((item) =>
+                                item.id === target.id
+                                  ? {
+                                      ...item,
+                                      values: {
+                                        ...item.values,
+                                        [field.key]: nextValue,
+                                      },
+                                    }
+                                  : item,
+                              ),
+                            )
+                          }}
+                        >
+                          <SelectTrigger id={`notification-${target.id}-${field.key}`} className="w-full">
+                            <SelectValue placeholder={field.placeholder} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectGroup>
+                              {field.options.map((option) => (
+                                <SelectItem key={option.value} value={option.value}>
+                                  {option.label}
+                                </SelectItem>
+                              ))}
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                      ) : (
+                        <Input
+                          id={`notification-${target.id}-${field.key}`}
+                          type={field.inputType ?? "text"}
+                          value={notificationFieldValue(target, field.key)}
+                          onChange={(event) => {
+                            notificationsDirtyRef.current = true
+                            setNotificationTargets((current) =>
+                              current.map((item) =>
+                                item.id === target.id
+                                  ? {
+                                      ...item,
+                                      values: {
+                                        ...item.values,
+                                        [field.key]: event.target.value,
+                                      },
+                                    }
+                                  : item,
+                              ),
+                            )
+                          }}
+                          placeholder={field.placeholder}
+                        />
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )})
+        ) : (
+          <div className="rounded-lg border border-dashed px-4 py-10 text-center text-sm text-muted-foreground">
+            <p className="text-sm text-muted-foreground">
+              尚未添加通知渠道
+            </p>
+          </div>
+        )}
+        {notificationTargets.length > 0 || configuredCount > 0 ? <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            disabled={actionBusy}
+            onClick={() => {
+              void saveNotifications()
+            }}
+          >
+            <SaveIcon data-icon="inline-start" />
+            保存通知渠道
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={!status}
+            onClick={() => {
+              if (!status) return
+              notificationsDirtyRef.current = false
+              syncFormsFromStatus(status)
+            }}
+          >
+            撤销修改
+          </Button>
+        </div> : null}
+      </div>
+    </div>
+  )
+
+  if (directModem || !status) {
+    return <ReceiverView
+      status={status}
+      loading={isLoadingStatus}
+      refreshing={isRefreshing}
+      busy={actionBusy}
+      actionLabel={shellActionLabel || null}
+      actionTarget={activeAction?.target}
+      notificationEditor={notificationEditor}
+      autoRefresh={autoRefresh}
+      refreshSeconds={refreshSeconds}
+      onAutoRefreshChange={setAutoRefresh}
+      onRefreshSecondsChange={setRefreshSeconds}
+      keepaliveEditor={<KeepalivePanel
+        profiles={status?.profiles ?? []}
+        tasks={keepaliveTasks}
+        settings={keepaliveSettings}
+        snapshot={keepalive}
+        busy={actionBusy}
+        onTasksChange={(tasks) => { keepaliveDirtyRef.current = true; setKeepaliveTasks(tasks) }}
+        onSettingsChange={(settings) => { keepaliveDirtyRef.current = true; setKeepaliveSettings(settings) }}
+        onSave={() => { void saveKeepalive() }}
+        onReset={() => { if (status) { keepaliveDirtyRef.current = false; syncFormsFromStatus(status) } }}
+      />}
+      logs={logs}
+      onClearLogs={() => setLogs([])}
+      onRefresh={() => { void refreshStatus(false, true) }}
+      onRefreshInbox={() => { void runAction("restart_sms", {}, "重新读取设备") }}
+      onSwitch={(profile) => { void runAction("switch_profile", { iccid: profile.iccid }, `切换到 ${profile.display_name}`) }}
+      onResendNotification={() => { void runAction("resend_last_sms", {}, "推送最近一条短信") }}
+    />
+  }
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(14,165,233,0.18),_transparent_30%),linear-gradient(180deg,_#f7f9fc_0%,_#eef3f7_100%)] pb-24 sm:pb-28">
@@ -1298,7 +1614,7 @@ function App() {
                 </div>
                 <CardTitle className="text-2xl sm:text-3xl">eSIM SMS Forwarder</CardTitle>
                 <CardDescription className="max-w-3xl">
-                  eSIM 管理与短信转发
+                  {directModem ? "ML307C · 实时收短信与 eSIM 切换 · 主动发短信和保号已停用" : "eSIM 管理与短信转发"}
                 </CardDescription>
               </div>
               <div className="flex flex-col gap-3 sm:items-end">
@@ -1327,7 +1643,7 @@ function App() {
                   <Button
                     type="button"
                     variant="outline"
-                    disabled={actionBusy}
+                    disabled={actionBusy || directModem}
                     onClick={() => {
                       void runAction("recover_modem", {}, "重启基带")
                     }}
@@ -1344,7 +1660,7 @@ function App() {
                     }}
                   >
                     <SendIcon data-icon="inline-start" />
-                    重启转发
+                    {directModem ? "刷新收信" : "重启转发"}
                   </Button>
                 </div>
               </div>
@@ -1354,22 +1670,22 @@ function App() {
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
               <OverviewTile
                 icon={CardSimIcon}
-                label={esimEnabled ? "当前 Profile" : "当前 SIM"}
+                label={directModem ? "当前卡片 / 品牌" : esimEnabled ? "当前 Profile" : "当前 SIM"}
                 value={activeProfileLabel}
                 hint={activeProfileHint}
               />
               <OverviewTile
                 icon={RadioTowerIcon}
-                label="运营商"
+                label={directModem ? "当前驻网运营商" : "运营商"}
                 value={status?.modem.operator_name || "--"}
-                hint={`${status?.modem.operator_code || "--"} · ${formatRegistrationState(status?.modem.registration || "--")}`}
+                hint={`${directModem ? "PLMN " : ""}${status?.modem.operator_code || "--"} · ${formatRegistrationState(status?.modem.registration || "--")}`}
               />
               <OverviewTile
                 icon={SignalIcon}
-                label="信号与制式"
-                value={`${status?.modem.signal || "--"}%`}
-                hint={`${formatAccessTech(status?.modem.access_tech || "--")}\n${formatCurrentModes(status?.modem.current_modes || "--")}`}
-                badgeVariant={signalVariant(status?.modem.signal || "--")}
+                label={directModem ? `信号强度（${radioSignal?.rsrp_text ? "RSRP" : "RSSI"}）` : "信号与制式"}
+                value={signalValue}
+                hint={signalHint}
+                badgeVariant={directModem ? undefined : signalVariant(status?.modem.signal || "--")}
               />
               <OverviewTile
                 icon={WifiIcon}
@@ -1479,6 +1795,7 @@ function App() {
                                   type="button"
                                   size="sm"
                                   variant="outline"
+                                  disabled={directModem}
                                   onClick={() => {
                                     setExpandedProfileIccid((current) => (current === profile.iccid ? null : profile.iccid))
                                   }}
@@ -1598,7 +1915,7 @@ function App() {
                     <EmptyState
                       icon={CardSimIcon}
                       title="还没有读到 Profile"
-                      description="检查 lpac-switch 是否可用，或者先点一次刷新状态。"
+                      description={directModem ? "检查模组连接，稍后点刷新状态。" : "检查 lpac-switch 是否可用，或者先点一次刷新状态。"}
                     />
                   )}
                 </div>
@@ -1614,7 +1931,7 @@ function App() {
                     <MessageSquareTextIcon />
                     最近短信
                   </CardTitle>
-                  <CardDescription>按最近收到的顺序显示，支持中文转义和 Base64 文本自动还原。</CardDescription>
+                  <CardDescription>{directModem ? "后台持续接收并保存，切换卡片后仍可查看历史短信。" : "按最近收到的顺序显示，支持中文转义和 Base64 文本自动还原。"}</CardDescription>
                 </div>
                 <CardAction>
                   <div className="flex flex-col items-end gap-2">
@@ -1623,13 +1940,13 @@ function App() {
                       type="button"
                       size="sm"
                       variant="outline"
-                      disabled={actionBusy || !(status?.sms.length ?? 0)}
+                      disabled={actionBusy || !(status?.sms.length ?? 0) || !configuredCount}
                       onClick={() => {
                         void runAction("resend_last_sms", {}, "重发最后一条短信")
                       }}
                     >
                       <SendIcon data-icon="inline-start" />
-                      重发最后一条短信
+                      重新推送最后一条
                     </Button>
                   </div>
                 </CardAction>
@@ -1647,7 +1964,8 @@ function App() {
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="font-medium">{sms.number || "未知号码"}</span>
                           <Badge variant="secondary">{sms.state_label}</Badge>
-                          <Badge variant="outline">{sms.timestamp}</Badge>
+                           <Badge variant="outline">{sms.timestamp}</Badge>
+                           {sms.profile_name ? <Badge variant="outline">{sms.profile_name}</Badge> : null}
                         </div>
                         <p className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-foreground/90">
                           {sms.text || "短信正文为空"}
@@ -1675,7 +1993,7 @@ function App() {
                   <Settings2Icon />
                   高级设置
                 </CardTitle>
-                <CardDescription>APN、选网、网络制式、保活任务和通知渠道都放在这里，避免主界面出现空白区。</CardDescription>
+                <CardDescription>{directModem ? "配置短信通知渠道；网络设置与保号暂未开放。" : "配置网络、保活任务和通知渠道。"}</CardDescription>
               </div>
               <CardAction>
                 <Button
@@ -1696,10 +2014,10 @@ function App() {
           </CardHeader>
           {advancedOpen ? (
           <CardContent>
-            <Tabs defaultValue="network" className="gap-4">
+            <Tabs defaultValue={directModem ? "forwarder" : "network"} className="gap-4">
               <TabsList variant="line">
-                <TabsTrigger value="network">网络</TabsTrigger>
-                <TabsTrigger value="keepalive">保活</TabsTrigger>
+                <TabsTrigger value="network" disabled={directModem}>网络</TabsTrigger>
+                <TabsTrigger value="keepalive" disabled={directModem}>{directModem ? "保活（已停用）" : "保活"}</TabsTrigger>
                 <TabsTrigger value="forwarder">通知</TabsTrigger>
               </TabsList>
 
@@ -2321,211 +2639,7 @@ function App() {
 
               <TabsContent value="forwarder" className="flex flex-col gap-5">
                 <div className="grid gap-5 xl:grid-cols-[1.1fr_0.9fr]">
-                  <div className="rounded-2xl border border-border/70 bg-background/70 p-4">
-                    <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                      <div className="flex items-center gap-2">
-                        <SendIcon className="text-muted-foreground" />
-                        <div>
-                          <h3 className="font-medium">通知渠道配置</h3>
-                          <p className="text-sm text-muted-foreground">
-                            先选择渠道类型再添加，每种渠道只保留一份，表单会按渠道类型显示对应字段。
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex w-full flex-col gap-2 sm:w-auto sm:min-w-72">
-                        <Select
-                          value={newNotificationType}
-                          onValueChange={(value) => {
-                            setNewNotificationType(value as ChannelKind)
-                          }}
-                          disabled={actionBusy || !availableNotificationTypes.length}
-                        >
-                          <SelectTrigger className="w-full">
-                            <SelectValue placeholder="选择通知渠道" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectGroup>
-                              <SelectLabel>可添加渠道</SelectLabel>
-                              {availableNotificationTypes.map((type) => (
-                                <SelectItem key={type} value={type}>
-                                  {NOTIFICATION_CHANNEL_DEFINITIONS[type].label}
-                                </SelectItem>
-                              ))}
-                            </SelectGroup>
-                          </SelectContent>
-                        </Select>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          disabled={actionBusy || !availableNotificationTypes.length}
-                          onClick={() => {
-                            notificationsDirtyRef.current = true
-                            setNotificationTargets((current) => {
-                              if (current.some((item) => item.type === newNotificationType)) return current
-                              const next = [...current, createNotificationTarget(newNotificationType)]
-                              return next.sort(
-                                (left, right) =>
-                                  NOTIFICATION_CHANNEL_ORDER.indexOf(left.type) -
-                                  NOTIFICATION_CHANNEL_ORDER.indexOf(right.type),
-                              )
-                            })
-                          }}
-                        >
-                          <PlusIcon data-icon="inline-start" />
-                          添加渠道
-                        </Button>
-                      </div>
-                    </div>
-                    <div className="flex flex-col gap-4">
-                      {notificationTargets.length ? (
-                        notificationTargets.map((target) => {
-                          const definition = NOTIFICATION_CHANNEL_DEFINITIONS[target.type]
-                          return (
-                          <div key={target.id} className="rounded-2xl border border-border/70 bg-white/80 p-4 shadow-sm">
-                            <div className="flex flex-col gap-4">
-                              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                                <div className="flex flex-col gap-2">
-                                  <div className="flex items-center gap-2">
-                                    <Badge variant="outline">{definition.label}</Badge>
-                                    <Badge variant="secondary">{target.enabled ? "已启用" : "已停用"}</Badge>
-                                  </div>
-                                  <p className="text-sm text-muted-foreground">{definition.description}</p>
-                                </div>
-                                <div className="flex items-center gap-3">
-                                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                                    <span>启用转发</span>
-                                    <Switch
-                                      checked={target.enabled}
-                                      onCheckedChange={(checked) => {
-                                        notificationsDirtyRef.current = true
-                                        setNotificationTargets((current) =>
-                                          current.map((item) => (item.id === target.id ? { ...item, enabled: checked } : item)),
-                                        )
-                                      }}
-                                      aria-label={`切换 ${definition.label} 启用状态`}
-                                    />
-                                  </div>
-                                  <Button
-                                    type="button"
-                                    size="sm"
-                                    variant="outline"
-                                    disabled={actionBusy}
-                                    onClick={() => {
-                                      notificationsDirtyRef.current = true
-                                      setNotificationTargets((current) =>
-                                        current.filter((item) => item.id !== target.id),
-                                      )
-                                    }}
-                                  >
-                                    <Trash2Icon data-icon="inline-start" />
-                                    删除
-                                  </Button>
-                                </div>
-                              </div>
-                              <div className="grid gap-4 md:grid-cols-2">
-                                {definition.fields.map((field) => (
-                                  <div key={`${target.id}-${field.key}`} className="grid gap-2">
-                                    <Label htmlFor={`notification-${target.id}-${field.key}`}>
-                                      {field.label}
-                                    </Label>
-                                    {field.options ? (
-                                      <Select
-                                        value={notificationFieldValue(target, field.key)}
-                                        onValueChange={(value) => {
-                                          const nextValue = value ?? ""
-                                          notificationsDirtyRef.current = true
-                                          setNotificationTargets((current) =>
-                                            current.map((item) =>
-                                              item.id === target.id
-                                                ? {
-                                                    ...item,
-                                                    values: {
-                                                      ...item.values,
-                                                      [field.key]: nextValue,
-                                                    },
-                                                  }
-                                                : item,
-                                            ),
-                                          )
-                                        }}
-                                      >
-                                        <SelectTrigger id={`notification-${target.id}-${field.key}`} className="w-full">
-                                          <SelectValue placeholder={field.placeholder} />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                          <SelectGroup>
-                                            {field.options.map((option) => (
-                                              <SelectItem key={option.value} value={option.value}>
-                                                {option.label}
-                                              </SelectItem>
-                                            ))}
-                                          </SelectGroup>
-                                        </SelectContent>
-                                      </Select>
-                                    ) : (
-                                      <Input
-                                        id={`notification-${target.id}-${field.key}`}
-                                        type={field.inputType ?? "text"}
-                                        value={notificationFieldValue(target, field.key)}
-                                        onChange={(event) => {
-                                          notificationsDirtyRef.current = true
-                                          setNotificationTargets((current) =>
-                                            current.map((item) =>
-                                              item.id === target.id
-                                                ? {
-                                                    ...item,
-                                                    values: {
-                                                      ...item.values,
-                                                      [field.key]: event.target.value,
-                                                    },
-                                                  }
-                                                : item,
-                                            ),
-                                          )
-                                        }}
-                                        placeholder={field.placeholder}
-                                      />
-                                    )}
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          </div>
-                        )})
-                      ) : (
-                        <div className="flex min-h-48 flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-border/70 bg-white/80 px-6 text-center">
-                          <p className="max-w-md text-sm text-muted-foreground">
-                            当前还没有配置通知渠道。先从上方选择一个渠道类型，再添加到列表里继续填写。
-                          </p>
-                        </div>
-                      )}
-                      <div className="flex flex-wrap gap-2">
-                        <Button
-                          type="button"
-                          disabled={actionBusy}
-                          onClick={() => {
-                            void saveNotifications()
-                          }}
-                        >
-                          <SendIcon data-icon="inline-start" />
-                          保存通知渠道
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          disabled={!status}
-                          onClick={() => {
-                            if (!status) return
-                            notificationsDirtyRef.current = false
-                            syncFormsFromStatus(status)
-                          }}
-                        >
-                          恢复当前状态
-                        </Button>
-                      </div>
-                    </div>
-                  </div>
+                  {notificationEditor}
 
                   <div className="rounded-2xl border border-border/70 bg-background/70 p-4">
                     <div className="mb-4 flex items-center gap-2">
@@ -2536,7 +2650,7 @@ function App() {
                       </div>
                     </div>
                     <div className="grid gap-3">
-                      <ServiceLine name="ModemManager" state={status?.services.modemmanager || "--"} />
+                      <ServiceLine name={directModem ? "模组连接" : "ModemManager"} state={status?.services.modemmanager || "--"} />
                       <ServiceLine name="短信转发" state={status?.services.sms_forwarder || "--"} />
                       <ServiceLine name="管理页面" state={status?.services.web_admin || "--"} />
                       <Separator />
@@ -2558,7 +2672,7 @@ function App() {
                         }}
                       >
                         <RefreshCwIcon data-icon="inline-start" />
-                        重启短信转发
+                        {directModem ? "刷新收信状态" : "重启短信转发"}
                       </Button>
                     </div>
                   </div>
@@ -2576,7 +2690,7 @@ function App() {
           </CardHeader>
           <CardContent className="grid gap-3 text-sm text-muted-foreground md:grid-cols-3">
             <div className="rounded-2xl border border-border/70 bg-background/70 p-4">
-              切卡后会自动触发重启基带，Shell 会显示停 ModemManager、SIM 断电、SIM 上电和重新注册的每一步。
+              {directModem ? "切卡任务会确认卡片状态并等待网络注册，完成后再接收目标卡的短信。" : "切卡后会自动恢复基带，日志会显示重新注册的每一步。"}
             </div>
             <div className="rounded-2xl border border-border/70 bg-background/70 p-4">
               最近短信和 eSIM Profiles 都是滚动区域，会随着状态刷新自动更新，不需要手动刷新整个页面。

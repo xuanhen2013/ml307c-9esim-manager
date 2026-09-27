@@ -1,0 +1,42 @@
+name: ML307 checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements-ml307.txt
+      - name: Backend tests (no modem or SMS)
+        run: python -B -m unittest discover -s tests -v
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+      - name: Lint frontend
+        working-directory: frontend
+        run: npm run lint
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+      - name: Prepare offline container dependencies
+        run: python -m pip download --dest wheels --only-binary=:all: -r requirements-ml307.txt
+      - name: Validate container build
+        run: docker build -f Dockerfile.ml307 -t ml307-check .
