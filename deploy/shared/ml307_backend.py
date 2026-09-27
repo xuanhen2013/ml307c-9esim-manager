@@ -49,6 +49,7 @@ class SmsStore:
                 sms_id INTEGER NOT NULL, target_id TEXT NOT NULL, delivered INTEGER DEFAULT 0,
                 attempts INTEGER DEFAULT 0, retry_at REAL DEFAULT 0,
                 PRIMARY KEY(sms_id,target_id));
+              CREATE INDEX IF NOT EXISTS sms_profile_id ON sms(profile_iccid,id);
             ''')
 
     @contextmanager
@@ -86,6 +87,18 @@ class SmsStore:
               ON d.sms_id=sms.id AND d.target_id=?
               WHERE sms.imported=0 AND sms.id>? AND coalesce(d.delivered,0)=0 AND coalesce(d.retry_at,0)<=?
               ORDER BY sms.id LIMIT 10''', (target_id,after_id,time.time())).fetchall()
+        return [dict(row) for row in rows]
+
+    def latest_id(self):
+        with self.connect() as db:
+            return db.execute('SELECT coalesce(max(id),0) FROM sms').fetchone()[0]
+
+    def received_after(self, profile_iccid, after_id, through_id, limit=200):
+        with self.connect() as db:
+            db.row_factory = sqlite3.Row
+            rows = db.execute('''SELECT id,text,received_at FROM sms
+                WHERE profile_iccid=? AND imported=0 AND id>? AND id<=? ORDER BY id LIMIT ?''',
+                (profile_iccid,after_id,through_id,limit)).fetchall()
         return [dict(row) for row in rows]
 
     def delivery_result(self, sms_id, target_id, success):

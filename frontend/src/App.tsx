@@ -59,6 +59,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 import { ReceiverView } from "./ReceiverView"
 import { KeepalivePanel } from "./KeepalivePanel"
+import { ReceiveReminderPanel, type ReceiveReminderSnapshot } from "./ReceiveReminderPanel"
 
 export type Profile = {
   iccid: string
@@ -141,6 +142,7 @@ export type StatusData = {
     next_allowed_at: string
   }
   sms: SmsItem[]
+  receive_reminders?: ReceiveReminderSnapshot | null
   timestamp: string
 }
 
@@ -1576,7 +1578,10 @@ function App() {
       refreshSeconds={refreshSeconds}
       onAutoRefreshChange={setAutoRefresh}
       onRefreshSecondsChange={setRefreshSeconds}
-      keepaliveEditor={<KeepalivePanel
+      keepaliveEditor={<div className="space-y-5">
+        <ReceiveReminderPanel profiles={status?.profiles ?? []} snapshot={status?.receive_reminders}
+          busy={actionBusy} onSaved={() => refreshStatus(false, true)} />
+        <KeepalivePanel
         profiles={status?.profiles ?? []}
         tasks={keepaliveTasks}
         settings={keepaliveSettings}
@@ -1586,7 +1591,7 @@ function App() {
         onSettingsChange={(settings) => { keepaliveDirtyRef.current = true; setKeepaliveSettings(settings) }}
         onSave={() => { void saveKeepalive() }}
         onReset={() => { if (status) { keepaliveDirtyRef.current = false; syncFormsFromStatus(status) } }}
-      />}
+      /></div>}
       logs={logs}
       onClearLogs={() => setLogs([])}
       onRefresh={() => { void refreshStatus(false, true) }}

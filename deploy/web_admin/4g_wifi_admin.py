@@ -43,6 +43,7 @@ ML307_MODE = os.environ.get("MODEM_BACKEND", "") == "ml307"
 ML307 = None
 FEISHU = None
 KEEPER = None
+RECEIVE_REMINDERS = None
 HOST = os.environ.get("FOURG_WIFI_ADMIN_HOST", "127.0.0.1" if ML307_MODE else "0.0.0.0")
 PORT = int(os.environ.get("FOURG_WIFI_ADMIN_PORT", "8080"))
 NOTIFICATION_CONFIG_PATH = Path(os.environ.get("SMS_FORWARDER_CONFIG", "/etc/sms-forwarder.conf"))
@@ -2332,6 +2333,12 @@ class AppHandler(BaseHTTPRequestHandler):
                 message = execute_sync_action("save_keepalive", data)
                 self._write_json(200, {"ok": True, "message": message, "status": get_status()})
                 return
+            if path == "/api/receive-reminders":
+                if not ML307_MODE or RECEIVE_REMINDERS is None:
+                    raise ValueError('当前设备不支持收码提醒')
+                RECEIVE_REMINDERS.configure(data.get('rules', []))
+                self._write_json(200, {'ok':True, 'status':get_status()})
+                return
             if path == "/api/modem/recover":
                 self._handle_sync_action("recover_modem", data)
                 return
@@ -2380,13 +2387,14 @@ def get_ml307_status(refresh_profiles: bool = False) -> dict[str, Any]:
                           "configured_labels":configured_channel_labels(configured), "targets":targets},
         "feishu": FEISHU.snapshot() if FEISHU else {"configured": False},
         "keepalive": keepalive_status_snapshot(profiles),
+        "receive_reminders": RECEIVE_REMINDERS.snapshot(profiles) if RECEIVE_REMINDERS else None,
         "sms": messages,
         "timestamp": format_beijing_timestamp(snapshot["updated"] or datetime.now(timezone.utc).isoformat()),
     }
 
 
 def main() -> None:
-    global ML307, FEISHU, KEEPER
+    global ML307, FEISHU, KEEPER, RECEIVE_REMINDERS
     # Reject a second instance before it can touch the shared modem.
     server = ThreadingHTTPServer((HOST, PORT), AppHandler)
     if ML307_MODE:
@@ -2421,6 +2429,10 @@ def main() -> None:
 
         KEEPER = IntervalKeepalive(Path(os.environ.get('ML307_DATA_DIR', str(APP_CONFIG_PATH.parent))) / 'keepalive.sqlite3',
                                    ML307, enqueue_interval, interval_notice)
+        from receive_reminders import ReceiveReminders
+        RECEIVE_REMINDERS = ReceiveReminders(
+            Path(os.environ.get('ML307_DATA_DIR', str(APP_CONFIG_PATH.parent))) / 'receive_reminders.sqlite3',
+            ML307.store, interval_notice)
         ML307.refresh(force_profiles=True)
         ML307.start()
     if esim_management_enabled():
@@ -2436,7 +2448,8 @@ def main() -> None:
     if ML307_MODE and feishu_config.exists():
         try:
             from feishu_bot import FeishuBot
-            FEISHU = FeishuBot(feishu_config, ML307.store, get_ml307_status, start_action, get_action_snapshot)
+            FEISHU = FeishuBot(feishu_config, ML307.store, get_ml307_status, start_action, get_action_snapshot,
+                               notice_valid=RECEIVE_REMINDERS.notice_is_current)
             FEISHU.start()
             print('Feishu bot initialized')
         except Exception:
@@ -2445,10 +2458,13 @@ def main() -> None:
         threading.Thread(target=keepalive_scheduler, daemon=True).start()
     else:
         KEEPER.start()
+        RECEIVE_REMINDERS.start()
     print(f"4G WiFi admin listening on http://{HOST}:{PORT}")
     try:
         server.serve_forever()
     finally:
+        if RECEIVE_REMINDERS is not None:
+            RECEIVE_REMINDERS.stop.set()
         if KEEPER is not None:
             KEEPER.stop.set()
         if FEISHU is not None:

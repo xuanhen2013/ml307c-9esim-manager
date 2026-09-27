@@ -91,6 +91,17 @@ class BotTests(unittest.TestCase):
         self.api.send.assert_not_called()
         self.assertEqual(self.bot.commands.qsize(), 1)
 
+    def test_stale_receive_reminder_is_dropped_before_network_delivery(self):
+        self.bind()
+        self.bot.notice_valid = lambda key: not key.startswith('receive-reminder:')
+        self.bot.text('stale deadline',key='receive-reminder:old')
+        self.bot.text('ordinary notification',key='keepalive:current')
+        self.bot.flush()
+        self.api.send.assert_called_once()
+        self.assertEqual(self.api.send.call_args.args[2],{'text':'ordinary notification'})
+        with self.bot.state.connect() as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM outbox WHERE id='receive-reminder:old'").fetchone())
+
     def test_duplicate_buttons_do_not_switch_twice_including_restart(self):
         self.bind()
         callback = self.callback()

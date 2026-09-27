@@ -103,10 +103,11 @@ def safe_md(value):
 
 
 class FeishuBot:
-    def __init__(self, config_path, sms_store, get_status, start_action, get_action, *, api=None):
+    def __init__(self, config_path, sms_store, get_status, start_action, get_action, *, api=None, notice_valid=None):
         self.config = json.loads(Path(config_path).read_text(encoding='utf-8'))
         self.state = BotState(Path(config_path).with_suffix('.sqlite3'), self.config['app_id'])
         self.api = api or FeishuAPI(self.config)
+        self.notice_valid = notice_valid
         self.sms_store, self.get_status = sms_store, get_status
         self.start_action, self.get_action = start_action, get_action
         self.commands = queue.Queue(maxsize=32)
@@ -316,6 +317,10 @@ class FeishuBot:
             rows = db.execute('SELECT * FROM outbox WHERE delivered=0 AND retry_at<=? ORDER BY rowid LIMIT 10', (time.time(),)).fetchall()
         for row in rows:
             try:
+                if self.notice_valid is not None and not self.notice_valid(row['id']):
+                    with self.state.connect() as db:
+                        db.execute('DELETE FROM outbox WHERE id=? AND delivered=0', (row['id'],))
+                    continue
                 content = json.loads(row['content'])
                 payload = content['card'] if row['kind'] == 'interactive' else content
                 message_id = self.api.send(self.owner['owner'], row['kind'], payload,

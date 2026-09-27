@@ -55,6 +55,7 @@ sudo docker compose -f compose.nas.yaml up -d
 
 - `sms.sqlite3`：短信与通知投递状态。
 - `keepalive.sqlite3`：保号规则、发送记录与待通知事项。
+- `receive_reminders.sqlite3`：365 天收码提醒、最近识别进度及已提醒阶段。
 - `feishu.json` / `feishu.sqlite3`：应用凭据、个人绑定及通知队列。
 - `app.conf` / `notifications.conf`：应用与通知配置。
 
