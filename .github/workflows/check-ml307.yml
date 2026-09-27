@@ -37,6 +37,7 @@ jobs:
         working-directory: frontend
         run: npm run build
       - name: Prepare offline container dependencies
-        run: python -m pip download --dest wheels --only-binary=:all: -r requirements-ml307.txt
+        run: |
+          python -m pip download --dest wheels --only-binary=:all: -r requirements-ml307.txt
       - name: Validate container build
         run: docker build -f Dockerfile.ml307 -t ml307-check .
