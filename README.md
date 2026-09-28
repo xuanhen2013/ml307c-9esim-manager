@@ -56,4 +56,6 @@ npm run build
 
 短信、任务、通知凭据和飞书绑定均保存在运行时数据目录。`.localdata/`、`data/`、`.env`、数据库、日志及本地打包文件不提交到 Git；仓库只包含程序、测试和配置示例。
 
-[MIT License](LICENSE) · [原项目](https://github.com/cyDione/eSIM-SMS-Forwarder)
+[MIT License](LICENSE) · [第三方许可证与来源](THIRD_PARTY_NOTICES.md) · [原项目](https://github.com/cyDione/eSIM-SMS-Forwarder)
+
+本仓库不分发 lpac/libqmi 预编译二进制。ML307C 后端不依赖它们；旧 Debian 安装器按平台下载校验过的官方 lpac 包，较旧系统需自行编译。Geist 字体许可证随网页构建及部署包提供。

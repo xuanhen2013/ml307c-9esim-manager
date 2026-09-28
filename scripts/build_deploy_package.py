@@ -9,10 +9,13 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 INCLUDE_PATHS = [
     Path("README.md"),
+    Path("LICENSE"),
+    Path("THIRD_PARTY_NOTICES.md"),
+    Path("third_party"),
     Path("deploy"),
 ]
 SKIP_DIR_NAMES = {"__pycache__"}
-SKIP_SUFFIXES = {".pyc"}
+SKIP_SUFFIXES = {".pyc", ".zip"}
 
 
 def iter_files(repo_root: Path):

@@ -14,6 +14,8 @@ ENV PYTHONUNBUFFERED=1 \
     FOURG_WIFI_ADMIN_STATIC_DIR=/app/frontend/dist
 
 WORKDIR /app
+COPY LICENSE THIRD_PARTY_NOTICES.md /app/
+COPY third_party /app/third_party
 # The deployment bundle includes Linux wheels, so NAS builds need no Internet.
 COPY requirements-ml307.txt /app/requirements-ml307.txt
 COPY wheels /wheels

@@ -17,3 +17,4 @@ feishu.json
 notifications.conf
 app.conf
 profile_numbers.json
+deploy/esim/lpac-linux-*.zip

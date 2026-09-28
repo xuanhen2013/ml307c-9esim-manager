@@ -32,7 +32,8 @@ RUNTIME_VENV_DST="${RUNTIME_HOME_DST}/venv"
 REPO_OWNER="${REPO_OWNER:-cyDione}"
 REPO_NAME="${REPO_NAME:-eSIM-SMS-Forwarder}"
 LPAC_MANIFEST_NAME="${LPAC_MANIFEST_NAME:-lpac-assets.json}"
-LPAC_RELEASE_BASE_URL="${LPAC_RELEASE_BASE_URL:-https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest/download}"
+# Empty means the pinned official release below. A custom URL uses the legacy manifest format.
+LPAC_RELEASE_BASE_URL="${LPAC_RELEASE_BASE_URL:-}"
 LPAC_AUTO_DOWNLOAD="${LPAC_AUTO_DOWNLOAD:-1}"
 
 SIM_TYPE="esim"
@@ -72,7 +73,7 @@ Options:
 
 Environment:
   REPO_OWNER / REPO_NAME
-  LPAC_RELEASE_BASE_URL
+  LPAC_RELEASE_BASE_URL  Optional custom release with lpac-assets.json
   LPAC_AUTO_DOWNLOAD=1
 EOF
 }
@@ -598,6 +599,40 @@ download_remote_lpac_bundle() {
         return
     fi
 
+    if [ -z "${LPAC_RELEASE_BASE_URL}" ]; then
+        # Official v2.3.0 QMI builds require GLIBC 2.34. Do not install them on
+        # the older 2.31 systems that used the removed, untraceable local build.
+        if [ -z "${GLIBC_VERSION}" ] || ! version_le 2.34 "${GLIBC_VERSION}"; then
+            warn "官方 lpac v2.3.0 需要 GLIBC >= 2.34；请从官方源码为当前系统编译" >&2
+            return
+        fi
+        case "${ARCH}" in
+            aarch64) expected_sha256="e8d2808dfb179c1d3453655801b9f73d9edbd334b997845f2a41c7922d9331ad" ;;
+            x86_64) expected_sha256="f05d8fefeed27b205fd1bbb2441b93f5fa568b7647ffa7ba0e3adb3654d1408b" ;;
+            *) return ;;
+        esac
+        asset_name="lpac-linux-${ARCH}-with-qmi.zip"
+        output_path="${TMP_DIR}/${asset_name}"
+        log "下载官方 lpac v2.3.0: ${asset_name}" >&2
+        if ! download_file "https://github.com/estkme-group/lpac/releases/download/v2.3.0/${asset_name}" "${output_path}"; then
+            return
+        fi
+        if ! python3 - "${output_path}" "${expected_sha256}" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+actual = hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest()
+sys.exit(0 if actual == sys.argv[2] else 1)
+PY
+        then
+            warn "lpac 下载文件 SHA-256 校验失败，已拒绝安装" >&2
+            return 1
+        fi
+        printf '%s' "${output_path}"
+        return
+    fi
+
     manifest_path="${TMP_DIR}/${LPAC_MANIFEST_NAME}"
     if ! download_file "${LPAC_RELEASE_BASE_URL}/${LPAC_MANIFEST_NAME}" "${manifest_path}"; then
         return
@@ -609,7 +644,7 @@ download_remote_lpac_bundle() {
     fi
 
     output_path="${TMP_DIR}/${asset_name}"
-    log "下载匹配的 lpac 资产: ${asset_name}"
+    log "下载匹配的 lpac 资产: ${asset_name}" >&2
     if download_file "${LPAC_RELEASE_BASE_URL}/${asset_name}" "${output_path}"; then
         printf '%s' "${output_path}"
     fi
@@ -661,7 +696,7 @@ install_lpac() {
             install_lpac_bundle "${remote_bundle}"
         else
             warn "未找到与当前系统匹配的 lpac 资产"
-            warn "可在 release 中发布命名为 lpac-linux-${ARCH}-*.zip 的预编译包"
+            warn "请从 https://github.com/estkme-group/lpac 获取适配当前系统的官方包或源码"
             return
         fi
     fi

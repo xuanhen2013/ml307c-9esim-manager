@@ -1,0 +1,2 @@
+# Preserve upstream license texts verbatim, including their original whitespace.
+third_party/lpac-v2.3.0/LICENSE-* -text -whitespace
