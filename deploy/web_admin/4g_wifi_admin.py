@@ -44,6 +44,7 @@ ML307 = None
 FEISHU = None
 KEEPER = None
 RECEIVE_REMINDERS = None
+PROFILE_NUMBERS = None
 HOST = os.environ.get("FOURG_WIFI_ADMIN_HOST", "127.0.0.1" if ML307_MODE else "0.0.0.0")
 PORT = int(os.environ.get("FOURG_WIFI_ADMIN_PORT", "8080"))
 NOTIFICATION_CONFIG_PATH = Path(os.environ.get("SMS_FORWARDER_CONFIG", "/etc/sms-forwarder.conf"))
@@ -843,6 +844,7 @@ def enrich_profile(profile: dict[str, Any]) -> dict[str, Any]:
         or ""
     ).strip()
     enriched["iccid_short"] = str(profile.get("iccid", ""))[-6:]
+    enriched["phone_number"] = PROFILE_NUMBERS.get(profile.get('iccid')) if PROFILE_NUMBERS else ''
     return enriched
 
 
@@ -2339,6 +2341,15 @@ class AppHandler(BaseHTTPRequestHandler):
                 RECEIVE_REMINDERS.configure(data.get('rules', []))
                 self._write_json(200, {'ok':True, 'status':get_status()})
                 return
+            if path == "/api/profile/number":
+                if not ML307_MODE or PROFILE_NUMBERS is None:
+                    raise ValueError('当前设备不支持记录卡片号码')
+                iccid = data.get('iccid', '')
+                if not any(p['iccid'] == iccid for p in ML307.snapshot()['profiles']):
+                    raise ValueError('未找到对应卡片，请刷新卡片列表')
+                number = PROFILE_NUMBERS.save(iccid, data.get('phone_number'))
+                self._write_json(200, {'ok':True, 'phone_number':number})
+                return
             if path == "/api/modem/recover":
                 self._handle_sync_action("recover_modem", data)
                 return
@@ -2364,7 +2375,11 @@ def get_ml307_status(refresh_profiles: bool = False) -> dict[str, Any]:
     targets = load_notification_targets(read_env_config(NOTIFICATION_CONFIG_PATH))
     configured = configured_notification_targets(targets)
     messages = snapshot["sms"]
+    active = next((p for p in profiles if p['is_active']), {})
+    snapshot['modem']['number'] = active.get('phone_number') or '--'
     for message in messages:
+        message['recipient_number'] = (PROFILE_NUMBERS.get(message.get('profile_iccid'))
+                                       if PROFILE_NUMBERS and not message['imported'] else '')
         # Some roaming SMSCs report an inaccurate timezone. Keep that raw timestamp
         # in SQLite and show our observed arrival time for newly received messages.
         message["smsc_timestamp"] = message["timestamp"]
@@ -2394,11 +2409,14 @@ def get_ml307_status(refresh_profiles: bool = False) -> dict[str, Any]:
 
 
 def main() -> None:
-    global ML307, FEISHU, KEEPER, RECEIVE_REMINDERS
+    global ML307, FEISHU, KEEPER, RECEIVE_REMINDERS, PROFILE_NUMBERS
     # Reject a second instance before it can touch the shared modem.
     server = ThreadingHTTPServer((HOST, PORT), AppHandler)
     if ML307_MODE:
         from ml307_backend import ML307Backend
+        from profile_numbers import ProfileNumbers
+        PROFILE_NUMBERS = ProfileNumbers(
+            Path(os.environ.get('ML307_DATA_DIR', str(APP_CONFIG_PATH.parent))) / 'profile_numbers.json')
 
         def configured_targets():
             return configured_notification_targets(load_notification_targets(read_env_config(NOTIFICATION_CONFIG_PATH)))
@@ -2409,6 +2427,9 @@ def main() -> None:
             label = message.get("profile_name")
             if label:
                 title = f"{label} · {title}"
+            number = PROFILE_NUMBERS.get(message.get('profile_iccid')) if not message.get('imported') else ''
+            if number:
+                body = f'收件号码：{number}\n' + body
             send_apprise_notification([target], title, body)
 
         ML307 = ML307Backend(os.environ.get("ML307_PORT", "COM4" if os.name == "nt" else "usb"),
@@ -2449,7 +2470,8 @@ def main() -> None:
         try:
             from feishu_bot import FeishuBot
             FEISHU = FeishuBot(feishu_config, ML307.store, get_ml307_status, start_action, get_action_snapshot,
-                               notice_valid=RECEIVE_REMINDERS.notice_is_current)
+                               notice_valid=RECEIVE_REMINDERS.notice_is_current,
+                               number_lookup=PROFILE_NUMBERS.get)
             FEISHU.start()
             print('Feishu bot initialized')
         except Exception:

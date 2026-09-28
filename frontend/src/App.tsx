@@ -65,6 +65,7 @@ export type Profile = {
   iccid: string
   display_name: string
   provider_name?: string
+  phone_number?: string
   is_active?: boolean
   iccid_short?: string
   state?: string
@@ -80,6 +81,7 @@ export type SmsItem = {
   state: string
   state_label: string
   profile_name?: string
+  recipient_number?: string
   imported?: number
   received_at?: string
   smsc_timestamp?: string

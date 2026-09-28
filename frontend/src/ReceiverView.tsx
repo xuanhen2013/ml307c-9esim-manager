@@ -86,6 +86,13 @@ function Empty({ children }: { children: ReactNode }) {
   return <div className="flex min-h-40 flex-col items-center justify-center gap-3 p-6 text-sm text-muted-foreground"><InboxIcon className="size-6 opacity-50" />{children}</div>
 }
 
+function PhoneNumber({ number, label }: { number?: string; label: string }) {
+  return <div className="flex items-center gap-1.5 text-sm tabular-nums">
+    <span className="select-all">{number || "未记录号码"}</span>
+    {number ? <Button size="icon-xs" variant="ghost" aria-label={`复制 ${label} 手机号`} title="复制手机号" onClick={() => void copyText(number)}><CopyIcon /></Button> : null}
+  </div>
+}
+
 export function ReceiverView({
   status, loading, refreshing, busy, actionLabel, actionTarget,
   autoRefresh, refreshSeconds, onAutoRefreshChange, onRefreshSecondsChange,
@@ -107,7 +114,7 @@ export function ReceiverView({
   const filterNames = [...new Set(messages.map((sms) => sms.imported ? "未知卡片" : sms.profile_name || "未知卡片"))]
   const filtered = messages.filter((sms) => {
     const name = sms.imported ? "未知卡片" : sms.profile_name || "未知卡片"
-    return (cardFilter === "all" || cardFilter === name) && `${sms.number} ${sms.text} ${name}`.toLowerCase().includes(query.trim().toLowerCase())
+    return (cardFilter === "all" || cardFilter === name) && `${sms.number} ${sms.recipient_number || ""} ${sms.text} ${name}`.toLowerCase().includes(query.trim().toLowerCase())
   })
 
   function switchButton(profile: Profile) {
@@ -149,6 +156,7 @@ export function ReceiverView({
             <div className="space-y-2 p-5">
               <div className="flex items-center gap-2 text-xs text-muted-foreground"><CardSimIcon className="size-4" />当前卡片</div>
               <div className="text-xl font-semibold tracking-tight">{active?.display_name || (loading ? "读取中…" : "未读取到卡片")}</div>
+              {active ? <PhoneNumber number={active.phone_number} label={active.display_name} /> : null}
               <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground"><span>{active ? `ICCID 尾号 ${active.iccid.slice(-6)}` : "设备一次启用一张卡"}</span><Button size="xs" variant="ghost" onClick={() => setTab("profiles")}>管理卡片<ArrowRightIcon /></Button></div>
             </div>
             <div className="space-y-2 p-5">
@@ -190,6 +198,7 @@ export function ReceiverView({
                       <div className="flex flex-wrap items-center gap-2"><span className="text-sm font-medium tabular-nums">{sms.number || "未知号码"}</span><Badge variant="outline">{sms.imported ? "未知卡片" : sms.profile_name || "未知卡片"}</Badge></div>
                       <div className="flex items-center gap-2"><time className="text-xs text-muted-foreground" title={sms.imported ? "短信网络时间" : "本机接收时间"}>{messageTime(sms)}{sms.imported ? " · 网络时间" : ""}</time><Button variant="ghost" size="icon-xs" aria-label={`复制短信 ${sms.id}`} title="复制短信" onClick={() => void copyText(sms.text)}><CopyIcon /></Button></div>
                     </div>
+                    {sms.recipient_number ? <p className="mt-2 text-xs text-muted-foreground tabular-nums">收件号码 {sms.recipient_number}</p> : null}
                     <p className="mt-3 whitespace-pre-wrap break-words text-sm leading-6">{sms.text || "（空短信）"}</p>
                   </article>)}
                   {!filtered.length ? <Empty>{loading ? "读取中…" : query || cardFilter !== "all" ? "没有匹配的短信" : "暂无短信"}</Empty> : null}
@@ -197,7 +206,7 @@ export function ReceiverView({
                 <CardFooter className="justify-between gap-3 text-xs text-muted-foreground"><span>{filtered.length} / {messages.length} 条短信</span><span>{autoRefresh ? `每 ${refreshSeconds} 秒自动刷新` : "页面自动刷新已暂停"}</span></CardFooter>
               </Card>
               <div className="space-y-5">
-                <Card><CardHeader><CardTitle>快速切卡</CardTitle></CardHeader><CardContent className="space-y-4">{profiles.map((profile) => <div key={profile.iccid} className="flex items-center justify-between gap-3"><div><p className="text-sm font-medium">{profile.display_name}</p><p className="mt-1 text-xs text-muted-foreground">尾号 {profile.iccid.slice(-6)}</p></div>{switchButton(profile)}</div>)}{!profiles.length ? <p className="text-sm text-muted-foreground">未读取到卡片</p> : null}</CardContent></Card>
+                <Card><CardHeader><CardTitle>快速切卡</CardTitle></CardHeader><CardContent className="space-y-4">{profiles.map((profile) => <div key={profile.iccid} className="flex items-center justify-between gap-3"><div><p className="text-sm font-medium">{profile.display_name}</p><div className="mt-1 text-muted-foreground"><PhoneNumber number={profile.phone_number} label={profile.display_name} /></div></div>{switchButton(profile)}</div>)}{!profiles.length ? <p className="text-sm text-muted-foreground">未读取到卡片</p> : null}</CardContent></Card>
                 <Card><CardHeader><CardTitle>短信转发</CardTitle><CardDescription>{configured ? `${configured} 个通知渠道已启用` : "尚未配置通知渠道"}</CardDescription></CardHeader><CardContent><Button variant="outline" className="w-full" onClick={() => setTab("notifications")}><BellIcon />设置通知渠道</Button></CardContent></Card>
               </div>
             </div>
@@ -205,7 +214,7 @@ export function ReceiverView({
 
           <TabsContent value="profiles">
             <div className="mb-4 flex items-baseline gap-3"><h2 className="text-base font-medium">SIM 卡</h2><p className="text-sm text-muted-foreground">{profiles.length} 张卡片 · 同时启用一张</p></div>
-            <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">{profiles.map((profile) => <Card key={profile.iccid}><CardHeader><CardTitle className="flex items-center gap-2"><CardSimIcon className="size-4 text-muted-foreground" />{profile.display_name}</CardTitle><CardAction>{profile.is_active ? <Badge variant="secondary">使用中</Badge> : <Badge variant="outline">未启用</Badge>}</CardAction></CardHeader><CardContent className="space-y-4"><div><Label className="text-xs text-muted-foreground">ICCID</Label><div className="mt-1 flex items-center gap-2"><code className="break-all text-xs">{profile.iccid}</code><Button size="icon-xs" variant="ghost" aria-label={`复制 ${profile.display_name} ICCID`} onClick={() => void copyText(profile.iccid)}><CopyIcon /></Button></div></div>{profile.provider_name ? <div><p className="text-xs text-muted-foreground">服务商</p><p className="mt-1 text-sm">{profile.provider_name}</p></div> : null}</CardContent><CardFooter className="justify-end">{profile.is_active ? <span className="text-xs text-muted-foreground">当前接收短信的卡片</span> : switchButton(profile)}</CardFooter></Card>)}</div>
+            <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">{profiles.map((profile) => <Card key={profile.iccid}><CardHeader><CardTitle className="flex items-center gap-2"><CardSimIcon className="size-4 text-muted-foreground" />{profile.display_name}</CardTitle><CardAction>{profile.is_active ? <Badge variant="secondary">使用中</Badge> : <Badge variant="outline">未启用</Badge>}</CardAction></CardHeader><CardContent className="space-y-4"><div><Label className="text-xs text-muted-foreground">手机号</Label><div className="mt-1"><PhoneNumber number={profile.phone_number} label={profile.display_name} /></div></div><div><Label className="text-xs text-muted-foreground">ICCID</Label><div className="mt-1 flex items-center gap-2"><code className="break-all text-xs">{profile.iccid}</code><Button size="icon-xs" variant="ghost" aria-label={`复制 ${profile.display_name} ICCID`} onClick={() => void copyText(profile.iccid)}><CopyIcon /></Button></div></div>{profile.provider_name ? <div><p className="text-xs text-muted-foreground">服务商</p><p className="mt-1 text-sm">{profile.provider_name}</p></div> : null}</CardContent><CardFooter className="justify-end">{profile.is_active ? <span className="text-xs text-muted-foreground">当前接收短信的卡片</span> : switchButton(profile)}</CardFooter></Card>)}</div>
             {!profiles.length ? <Card><Empty>{loading ? "读取中…" : "未读取到卡片"}</Empty></Card> : null}
           </TabsContent>
 

@@ -91,6 +91,34 @@ class BotTests(unittest.TestCase):
         self.api.send.assert_not_called()
         self.assertEqual(self.bot.commands.qsize(), 1)
 
+    def test_numbers_command_and_menu_show_all_saved_numbers(self):
+        self.status['profiles'][0]['phone_number'] = '+447700900123'
+        self.status['profiles'][1]['phone_number'] = '+12025550123'
+        self.bind()
+        self.bot.handle(self.message('号码', owner='other'))
+        self.bot.flush()
+        self.api.send.assert_not_called()
+        self.bot.handle(self.message('号码'))
+        self.bot.menu()
+        self.bot.flush()
+        text = next(c.args[2]['text'] for c in self.api.send.call_args_list if c.args[1]=='text')
+        self.assertIn('Lebara：+447700900123', text)
+        self.assertIn('eSIM.gg：+12025550123', text)
+        card = next(c.args[2] for c in self.api.send.call_args_list if c.args[1]=='interactive')
+        self.assertIn('+447700900123', json.dumps(card))
+        self.assertIn('+12025550123', json.dumps(card))
+
+    def test_sms_recipient_is_original_card_not_current_active_card(self):
+        self.bind()
+        self.bot.number_lookup = lambda iccid: {'1':'+447700900123','2':'+12025550123'}.get(iccid,'')
+        self.add_sms('New verification code 123456')
+        self.bot.collect_sms()
+        self.bot.flush()
+        text = self.api.send.call_args.args[2]['text']
+        self.assertIn('收件号码：+12025550123', text)
+        self.assertNotIn('+447700900123', text)
+        self.assertIn('发件人：123', text)
+
     def test_stale_receive_reminder_is_dropped_before_network_delivery(self):
         self.bind()
         self.bot.notice_valid = lambda key: not key.startswith('receive-reminder:')

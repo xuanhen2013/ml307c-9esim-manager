@@ -102,12 +102,18 @@ def safe_md(value):
     return ''.join(f'&#{ord(c)};' if c in '*~><[]()#:_&' else c for c in str(value))
 
 
+def profile_label(profile):
+    number = profile.get('phone_number')
+    return profile['display_name'] + (f'（{number}）' if number else '')
+
+
 class FeishuBot:
-    def __init__(self, config_path, sms_store, get_status, start_action, get_action, *, api=None, notice_valid=None):
+    def __init__(self, config_path, sms_store, get_status, start_action, get_action, *, api=None, notice_valid=None, number_lookup=None):
         self.config = json.loads(Path(config_path).read_text(encoding='utf-8'))
         self.state = BotState(Path(config_path).with_suffix('.sqlite3'), self.config['app_id'])
         self.api = api or FeishuAPI(self.config)
         self.notice_valid = notice_valid
+        self.number_lookup = number_lookup or (lambda iccid: '')
         self.sms_store, self.get_status = sms_store, get_status
         self.start_action, self.get_action = start_action, get_action
         self.commands = queue.Queue(maxsize=32)
@@ -216,11 +222,18 @@ class FeishuBot:
             return
         if content in ('状态', '菜单', '切卡', '刷新', '/start', '/status', '帮助'):
             self.menu()
+        elif content in ('号码', '手机号', '/numbers'):
+            self.numbers()
         else:
-            self.text('发送“状态”查看当前卡、漫游网络和信号；发送“切卡”选择卡片。收到的新短信会自动通知。')
+            self.text('发送“状态”查看当前卡、漫游网络和信号；发送“切卡”选择卡片；发送“号码”查看所有卡片手机号。收到的新短信会自动通知。')
 
     def text(self, text, key=None):
         self.state.enqueue(key or str(uuid.uuid4()), 'text', {'text': text})
+
+    def numbers(self):
+        profiles = self.get_status()['profiles']
+        lines = [f"{p['display_name']}：{p.get('phone_number') or '未记录'}" for p in profiles]
+        self.text('卡片号码\n' + ('\n'.join(lines) if lines else '未读取到卡片'))
 
     def menu(self):
         status = self.get_status()
@@ -232,7 +245,8 @@ class FeishuBot:
         network = modem.get('operator_name') or modem.get('operator') or '未注册'
         network = network if isinstance(network, str) else '未注册'
         label = '漫游' if modem.get('registration') == 'roaming' else str(modem.get('registration', '未知'))
-        info = (f'**{safe_md(name)}**\n{safe_md(network)} · {safe_md(label)} · {safe_md(modem.get("access_tech", ""))}\n'
+        info = (f'**{safe_md(name)}**\n手机号：{safe_md(active.get("phone_number") or "未记录")}\n'
+                f'{safe_md(network)} · {safe_md(label)} · {safe_md(modem.get("access_tech", ""))}\n'
                 f'信号 {safe_md(signal.get("rssi_text", "未知"))} · RSRP {safe_md(signal.get("rsrp_text", "未知"))}')
         if status.get('status_message'):
             info += '\n' + safe_md(status['status_message'])
@@ -253,7 +267,7 @@ class FeishuBot:
         elements.append(button('刷新状态', 'status', primary=True))
         for profile in profiles:
             if not profile.get('is_active'):
-                elements.append(button('切换到 ' + profile['display_name'], 'switch', profile['iccid']))
+                elements.append(button('切换到 ' + profile_label(profile), 'switch', profile['iccid']))
         card = {'schema': '2.0', 'config': {'update_multi': True, 'enable_forward': False},
                 'header': {'title': {'tag': 'plain_text', 'content': '9eSIM'}, 'template': 'blue'},
                 'body': {'direction': 'vertical', 'vertical_spacing': '12px', 'elements': elements}}
@@ -271,7 +285,7 @@ class FeishuBot:
             self.text('这张卡已经在使用。')
             return
         with self.state.connect() as db:
-            db.execute('INSERT INTO jobs VALUES (?,?,?,?)', (key, '', target['display_name'], 'pending'))
+            db.execute('INSERT INTO jobs VALUES (?,?,?,?)', (key, '', profile_label(target), 'pending'))
         try:
             action_id = self.start_action('switch_profile', {'iccid': target['iccid']},
                                           metadata={'kind': 'feishu'}, reject_if_busy=True)
@@ -282,7 +296,7 @@ class FeishuBot:
             return
         with self.state.connect() as db:
             db.execute('UPDATE jobs SET action_id=? WHERE id=?', (action_id, key))
-        self.text('正在切换到 ' + target['display_name'] + '，等待网络注册。')
+        self.text('正在切换到 ' + profile_label(target) + '，等待网络注册。')
 
     def monitor_jobs(self):
         with self.state.connect() as db:
@@ -306,7 +320,10 @@ class FeishuBot:
             return
         for message in self.sms_store.pending(self.target, after_id=int(self.owner.get('baseline', 0))):
             timestamp = datetime.fromisoformat(message['received_at']).astimezone(timezone(timedelta(hours=8)))
+            number = self.number_lookup(message.get('profile_iccid')) if not message.get('imported') else ''
+            recipient = f'收件号码：{number}\n' if number else ''
             text = (f'{message["profile_name"] or "未知卡"} 收到短信\n'
+                    f'{recipient}'
                     f'发件人：{message["number"]}\n时间：{timestamp:%Y-%m-%d %H:%M:%S}（北京时间）\n\n{message["text"]}')
             self.text(text, 'sms:' + str(message['id']))
 
