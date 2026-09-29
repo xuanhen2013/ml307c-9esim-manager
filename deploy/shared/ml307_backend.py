@@ -10,7 +10,8 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from ml307_modem import Modem
+from ml307_modem import Modem, ProfileEnableError
+from notification_utils import NotificationError
 
 
 def complete_messages(messages):
@@ -50,6 +51,11 @@ class SmsStore:
                 attempts INTEGER DEFAULT 0, retry_at REAL DEFAULT 0,
                 PRIMARY KEY(sms_id,target_id));
               CREATE INDEX IF NOT EXISTS sms_profile_id ON sms(profile_iccid,id);
+              CREATE TABLE IF NOT EXISTS diagnostics (
+                id INTEGER PRIMARY KEY, time TEXT NOT NULL, level TEXT NOT NULL, message TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS notification_health (
+                target_id TEXT PRIMARY KEY, config_hash TEXT NOT NULL, failures INTEGER DEFAULT 0,
+                blocked INTEGER DEFAULT 0, retry_at REAL DEFAULT 0, error TEXT DEFAULT '');
             ''')
 
     @contextmanager
@@ -80,13 +86,14 @@ class SmsStore:
             rows = db.execute('SELECT * FROM sms ORDER BY id DESC LIMIT ?', (limit,)).fetchall()
         return [dict(row, id=str(row['id']), state='received', state_label='已接收') for row in rows]
 
-    def pending(self, target_id, after_id=0):
+    def pending(self, target_id, after_id=0, max_attempts=None):
         with self.connect() as db:
             db.row_factory = sqlite3.Row
             rows = db.execute('''SELECT sms.* FROM sms LEFT JOIN deliveries d
               ON d.sms_id=sms.id AND d.target_id=?
               WHERE sms.imported=0 AND sms.id>? AND coalesce(d.delivered,0)=0 AND coalesce(d.retry_at,0)<=?
-              ORDER BY sms.id LIMIT 10''', (target_id,after_id,time.time())).fetchall()
+              AND (? IS NULL OR coalesce(d.attempts,0)<?)
+              ORDER BY sms.id LIMIT 10''', (target_id,after_id,time.time(),max_attempts,max_attempts)).fetchall()
         return [dict(row) for row in rows]
 
     def latest_id(self):
@@ -106,6 +113,46 @@ class SmsStore:
             db.execute('''INSERT INTO deliveries (sms_id,target_id,delivered,attempts,retry_at) VALUES (?,?,?,1,?)
               ON CONFLICT(sms_id,target_id) DO UPDATE SET delivered=excluded.delivered,
               attempts=attempts+1,retry_at=excluded.retry_at''', (sms_id,target_id,int(success),time.time()+60))
+
+    def diagnostic(self, message, level='info'):
+        # Callers supply fixed stage descriptions, never AT payloads or SMS data.
+        with self.connect() as db:
+            db.execute('INSERT INTO diagnostics(time,level,message) VALUES (?,?,?)',
+                       (datetime.now(timezone.utc).isoformat(),level,message))
+            db.execute('DELETE FROM diagnostics WHERE id NOT IN (SELECT id FROM diagnostics ORDER BY id DESC LIMIT 200)')
+
+    def diagnostics(self):
+        with self.connect() as db:
+            db.row_factory = sqlite3.Row
+            return [dict(r) for r in db.execute('SELECT time,level,message FROM diagnostics ORDER BY id DESC LIMIT 100')]
+
+    def claim_recovery(self, cooldown=120):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute("SELECT value FROM meta WHERE key='last_recovery'").fetchone()
+            if row and time.time()-float(row[0]) < cooldown:
+                raise RuntimeError('刚执行过设备恢复，请等待两分钟后再试')
+            db.execute("INSERT OR REPLACE INTO meta VALUES ('last_recovery',?)", (str(time.time()),))
+
+    def notification_state(self, target):
+        fingerprint = hashlib.sha256(target['url'].encode()).hexdigest()
+        with self.connect() as db:
+            db.row_factory = sqlite3.Row
+            db.execute('''INSERT INTO notification_health(target_id,config_hash) VALUES (?,?)
+                ON CONFLICT(target_id) DO UPDATE SET config_hash=excluded.config_hash,failures=0,
+                blocked=0,retry_at=0,error='' WHERE config_hash<>excluded.config_hash''', (target['id'],fingerprint))
+            return dict(db.execute('SELECT * FROM notification_health WHERE target_id=?',(target['id'],)).fetchone())
+
+    def notification_result(self, target, error=None):
+        with self.connect() as db:
+            row = db.execute('SELECT failures FROM notification_health WHERE target_id=?',(target['id'],)).fetchone()
+            failures = row[0]+1 if error else 0
+            blocked = bool(error and (not error.retryable or failures >= 3))
+            reason = str(error) if error else ''
+            if error and failures >= 3 and error.retryable:
+                reason += '；连续失败三次，已停止自动重试'
+            db.execute('''UPDATE notification_health SET failures=?,blocked=?,retry_at=?,error=? WHERE target_id=?''',
+                       (failures,int(blocked),time.time()+(min(300,60*failures) if error else 15),reason,target['id']))
 
 
 class ML307Backend:
@@ -157,22 +204,43 @@ class ML307Backend:
         # Same lock covers polling, card mutation, re-registration and final verification.
         with self.operation_lock:
             self.update(busy=True)
+            self.store.diagnostic('开始切卡')
             try:
-                with Modem(self.port) as modem:
-                    profiles = modem.profiles()
-                    target = next((p for p in profiles if p['iccid'] == iccid), None)
-                    if not target:
-                        raise ValueError('目标配置不在当前卡列表中')
-                    active = next((p for p in profiles if p['enabled']), {})
-                    # Drain old-card messages before changing identity.
-                    self.store.ingest(modem.inbox(), active)
-                    if target['enabled']:
-                        log('这张卡已经启用')
+                for attempt in range(4):
+                    busy_error = None
+                    with Modem(self.port) as modem:
+                        profiles = modem.profiles()
+                        target = next((p for p in profiles if p['iccid'] == iccid), None)
+                        if not target:
+                            raise ValueError('目标配置不在当前卡列表中')
+                        active = next((p for p in profiles if p['enabled']), {})
+                        self.store.ingest(modem.inbox(), active)
+                        if target['enabled']:
+                            log('这张卡已经启用')
+                        else:
+                            label = target.get('serviceProviderName') or target.get('profileName') or '目标卡片'
+                            log('正在启用 ' + label)
+                            try:
+                                modem.enable(iccid)
+                            except ProfileEnableError as exc:
+                                if exc.code != 5:
+                                    raise
+                                busy_error = exc
+                            if busy_error is None:
+                                time.sleep(3)
+                    if busy_error is None:
+                        break
+                    self.store.diagnostic('切卡被拒绝：卡片会话忙（eUICC 5）', 'warning')
+                    if attempt < 2:
+                        delay = (3, 6)[attempt]
+                        log(f'卡片会话忙，等待 {delay} 秒后重试（{attempt+1}/2）')
+                        time.sleep(delay)
+                    elif attempt == 2:
+                        log('卡片持续忙，尝试一次设备恢复')
+                        self._reinitialize(active.get('iccid', ''), log)
                     else:
-                        label = target.get('serviceProviderName') or target.get('profileName') or iccid[-6:]
-                        log('正在启用 ' + label)
-                        modem.enable(iccid)
-                        time.sleep(3)
+                        raise RuntimeError('设备恢复后卡片仍忙（eUICC 5），已停止重试，请断电重插模组')
+                with Modem(self.port) as modem:
                     profiles = modem.profiles()
                     self.update(profiles=profiles)
                     self.last_profiles = time.monotonic()
@@ -201,10 +269,70 @@ class ML307Backend:
                         if status['state'] == 'registered' and status['sim_ready']:
                             self.store.ingest(modem.inbox(), target)
                             log('已注册网络：' + status['operator_name'])
+                            self.store.diagnostic('切卡完成：已核对目标卡片并完成网络注册')
                             return
                         time.sleep(3)
                     raise RuntimeError('配置已切换，但网络注册超时；请检查信号或稍后刷新')
             except Exception as exc:
+                self.update(error=str(exc))
+                code = f'（eUICC {exc.code}）' if isinstance(exc, ProfileEnableError) else ''
+                self.store.diagnostic('切卡未完成'+code, 'error')
+                raise
+            finally:
+                self.update(busy=False)
+
+    def _reinitialize(self, expected_iccid, log):
+        if not expected_iccid:
+            raise RuntimeError('无法确认当前卡片，暂不自动恢复，请刷新状态或断电重插')
+        self.store.claim_recovery()
+        self.store.diagnostic('开始设备恢复：发送一次软件重启指令')
+        log('正在重新初始化模组，连接会短暂中断')
+        with Modem(self.port) as modem:
+            modem.restart()
+        time.sleep(3)
+        end = time.monotonic()+90
+        ready_logged = False
+        while time.monotonic() < end:
+            try:
+                # Reopen after every boot probe; reboot recreates the USB node.
+                with Modem(self.port) as modem:
+                    profiles = modem.profiles()
+                    active = next((p for p in profiles if p['enabled']), {})
+                    status = modem.status()
+                    if active.get('iccid') != expected_iccid:
+                        raise ValueError('恢复后启用的卡片发生变化，已停止操作，请核对卡片状态')
+                    self.update(profiles=profiles, modem=status, error='',
+                                updated=datetime.now(timezone.utc).isoformat())
+                    if status['sim_ready'] and not ready_logged:
+                        log('SIM 已就绪，等待原卡恢复网络注册')
+                        ready_logged = True
+                    if status['sim_ready'] and status['state'] == 'registered':
+                        self.store.ingest(modem.inbox(), active)
+                        self.last_profiles = time.monotonic()
+                        log('设备已恢复，原卡保持启用并完成网络注册')
+                        self.store.diagnostic('设备恢复完成：原卡保持启用并已驻网')
+                        return
+            except (OSError, RuntimeError, KeyError):
+                pass  # Boot is asynchronous. Only verified state can end recovery.
+            time.sleep(3)
+        raise RuntimeError('设备恢复超时，已停止自动操作；请检查模组供电或断电重插')
+
+    def recover(self, log):
+        with self.operation_lock:
+            self.update(busy=True)
+            try:
+                profiles = self.snapshot()['profiles']
+                with Modem(self.port) as modem:
+                    try:
+                        profiles = modem.profiles()
+                        active = next((p for p in profiles if p['enabled']), {})
+                        self.store.ingest(modem.inbox(), active)
+                    except RuntimeError:
+                        pass
+                active = next((p for p in profiles if p['enabled']), {})
+                self._reinitialize(active.get('iccid', ''), log)
+            except Exception as exc:
+                self.store.diagnostic('设备恢复未完成，已停止操作', 'error')
                 self.update(error=str(exc))
                 raise
             finally:
@@ -256,20 +384,32 @@ class ML307Backend:
     def _notify(self):
         # Network delivery never holds the modem lock. Each channel has its own retry state.
         while not self.stop_event.is_set():
-            errors = []
             try:
-                for target in self.targets_callback():
-                    for message in self.store.pending(target['id']):
-                        try:
-                            self.notify_callback(target, message)
-                            self.store.delivery_result(message['id'],target['id'],True)
-                        except Exception:
-                            self.store.delivery_result(message['id'],target['id'],False)
-                            errors.append('通知未送达：' + str(target.get('label') or '未命名渠道'))
-                self.update(notify_error='；'.join(errors))
+                self.notify_once()
             except Exception:
                 self.update(notify_error='读取通知配置失败')
             self.stop_event.wait(10)
+
+    def notify_once(self):
+        errors = []
+        for target in self.targets_callback():
+            state = self.store.notification_state(target)
+            if not state['blocked'] and state['retry_at'] <= time.time():
+                # One message per channel per cycle; do not fan out failures to the backlog.
+                for message in self.store.pending(target['id'], max_attempts=3)[:1]:
+                    error = None
+                    try:
+                        self.notify_callback(target, message)
+                    except NotificationError as exc:
+                        error = exc
+                    except Exception:
+                        error = NotificationError('通知发送异常，请检查渠道配置')
+                    self.store.delivery_result(message['id'],target['id'],error is None)
+                    self.store.notification_result(target,error)
+                state = self.store.notification_state(target)
+            if state['error']:
+                errors.append(str(target.get('label') or '通知渠道')+'：'+state['error'])
+        self.update(notify_error='；'.join(errors))
 
     def start(self):
         threading.Thread(target=self._poll, name='ml307-receive', daemon=True).start()

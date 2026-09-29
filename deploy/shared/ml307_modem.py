@@ -166,13 +166,33 @@ class UsbTransport:
 
     def close(self):
         try:
-            self.call(ioc(2, 16, 4), ctypes.byref(ctypes.c_uint(2)))
+            try:
+                self.call(ioc(2, 16, 4), ctypes.byref(ctypes.c_uint(2)))
+            except OSError as exc:
+                if exc.errno not in (errno.ENODEV, errno.EINVAL, errno.EIO):
+                    raise
         finally:
             os.close(self.fd)
 
 
 class SmsRejected(RuntimeError):
     """The modem explicitly rejected the SMS submission."""
+
+
+class ATCommandError(RuntimeError):
+    def __init__(self, command, rejected):
+        self.rejected = rejected
+        super().__init__('%s 未成功：%s' % (command.split('=')[0],
+                         '设备返回 ERROR' if rejected else '超时'))
+
+
+class ProfileEnableError(RuntimeError):
+    def __init__(self, code):
+        self.code = code
+        reason = {1: '未找到目标卡片', 2: '目标卡片不是停用状态',
+                  3: '卡片策略不允许切换', 4: '卡片限制了重新启用的目标',
+                  5: '卡片会话忙（catBusy）', 127: '卡片返回未定义错误'}.get(code, '卡片返回未知错误')
+        super().__init__(f'启用配置失败：{reason}，eUICC 返回 {code}')
 
 
 def encode_submit(number, text):
@@ -212,7 +232,7 @@ class Modem:
         text = response.decode('ascii', errors='replace').strip()
         if not re.search(r'(?:^|[\r\n])OK(?:[\r\n]|$)', text):
             # APDU data and identifiers are intentionally excluded from errors.
-            raise RuntimeError('%s 未成功：%s' % (command.split('=')[0], '设备返回 ERROR' if 'ERROR' in text else '超时'))
+            raise ATCommandError(command, 'ERROR' in text)
         return text
 
     @contextlib.contextmanager
@@ -287,7 +307,26 @@ class Modem:
             reply = self.apdu(channel, request)
         code = int.from_bytes(dict(tlvs(dict(tlvs(reply))['BF31']))['80'], 'big')
         if code:
-            raise RuntimeError('启用配置失败，eUICC 返回 %d' % code)
+            raise ProfileEnableError(code)
+
+    def restart(self):
+        # Only enable the reset path on the firmware verified on real hardware.
+        # Other firmware must be validated before adding it to this allowlist.
+        version = self.at('AT+CGMR')
+        if 'ML307C-DC-CN-MBRH0S00' not in version.splitlines():
+            raise RuntimeError('当前固件尚未验证软件恢复，请断电重插模组')
+        capability = self.at('AT+CFUN=?')
+        if not re.search(r'\+CFUN:\s*\(0,1,4,5\),\(0-1\)', capability):
+            raise RuntimeError('模组未确认支持软件恢复，请断电重插模组')
+        try:
+            self.at('AT+CFUN=1,1', timeout=5)
+        except ATCommandError as exc:
+            if exc.rejected:
+                raise
+            # USB may disappear before OK. Never issue the reset a second time.
+        except OSError as exc:
+            if exc.errno not in (errno.ENODEV, errno.EIO, errno.ESHUTDOWN):
+                raise
 
     def status(self):
         pin = self.at('AT+CPIN?')

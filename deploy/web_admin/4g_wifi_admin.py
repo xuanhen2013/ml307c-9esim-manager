@@ -1587,9 +1587,9 @@ def save_notifications_config(ctx: ActionContext, payload: dict[str, Any]) -> No
             raise ValueError("启用中的通知渠道必须填写 Apprise URL")
         sanitized_targets.append(normalize_notification_target(raw_target))
 
-    if not sanitized_targets:
+    if not sanitized_targets and not ML307_MODE:
         raise ValueError("请至少保留一个通知渠道")
-    if not configured_channel_labels(sanitized_targets):
+    if not configured_channel_labels(sanitized_targets) and not ML307_MODE:
         raise ValueError("请至少启用一个通知渠道")
 
     config = ensure_notification_config(read_env_config(NOTIFICATION_CONFIG_PATH))
@@ -1636,10 +1636,7 @@ def restart_sms_service(ctx: ActionContext) -> None:
 def resend_last_sms(ctx: ActionContext) -> None:
     ctx.log("开始读取最后一条短信")
     detail = get_latest_sms_detail()
-    ctx.log(f"短信来源：{detail.get('number') or 'unknown'}")
-    ctx.log(f"短信时间：{detail.get('timestamp') or '未知时间'}")
-    for line in (detail.get("text") or "(empty)").splitlines():
-        ctx.log(line)
+    ctx.log("已读取最近一条短信，内容不写入操作日志")
 
     config = read_env_config(NOTIFICATION_CONFIG_PATH)
     targets = load_notification_targets(config)
@@ -1956,6 +1953,23 @@ def execute_action(action: str, payload: dict[str, Any], ctx: ActionContext) -> 
     if ML307_MODE:
         if action == "switch_profile":
             ML307.switch(str(payload.get("iccid", "")).strip(), ctx.log)
+        elif action == "recover_modem":
+            ML307.recover(ctx.log)
+        elif action == "test_notification":
+            from notification_utils import NotificationError
+            targets = load_notification_targets(read_env_config(NOTIFICATION_CONFIG_PATH))
+            target = next((t for t in targets if t['id'] == payload.get('target_id')), None)
+            if target is None:
+                raise ValueError('请先保存通知渠道')
+            ML307.store.notification_state(target)
+            try:
+                send_apprise_notification([dict(target, enabled=True)], '9eSIM 通知测试',
+                                           '这是一条通知测试消息，不含短信内容。')
+            except NotificationError as exc:
+                ML307.store.notification_result(target, exc)
+                raise
+            ML307.store.notification_result(target)
+            ctx.log('通知服务已接收测试消息；请在对应客户端确认到达')
         elif action == "restart_sms":
             ML307.refresh(force_profiles=True)
             error = ML307.snapshot()["error"]
@@ -2036,7 +2050,7 @@ def run_action_worker(action_id: str, action: str, payload: dict[str, Any]) -> N
 
 def start_action(action: str, payload: dict[str, Any], *, metadata: Optional[dict[str, Any]] = None,
                  reject_if_busy: bool = False) -> str:
-    if ML307_MODE and action not in {"switch_profile", "restart_sms", "save_notifications", "resend_last_sms", KEEPALIVE_ACTION_NAME}:
+    if ML307_MODE and action not in {"switch_profile", "recover_modem", "test_notification", "restart_sms", "save_notifications", "resend_last_sms", KEEPALIVE_ACTION_NAME}:
         raise ValueError("当前设备不支持此操作")
     if ML307_MODE and action == KEEPALIVE_ACTION_NAME and (KEEPER is None or not KEEPER.can_run(str(payload.get('run_id', '')))):
         raise ValueError('任务尚未到期或未排队')
@@ -2059,7 +2073,7 @@ def start_action(action: str, payload: dict[str, Any], *, metadata: Optional[dic
             }
     action_id = uuid.uuid4().hex[:12]
     with ACTIONS_LOCK:
-        if reject_if_busy and any(record['state'] in {'queued', 'running'} for record in ACTIONS.values()):
+        if (reject_if_busy or (ML307_MODE and action == 'recover_modem')) and any(record['state'] in {'queued', 'running'} for record in ACTIONS.values()):
             raise ValueError('已有操作正在执行，请完成后再试')
         ACTIONS[action_id] = {
             "id": action_id,
@@ -2390,16 +2404,22 @@ def get_ml307_status(refresh_profiles: bool = False) -> dict[str, Any]:
         "profiles": profiles,
         "capabilities": {"sim_type": "esim", "esim_management_enabled": True,
                          "lpac_installed": False, "direct_modem": True, "sms_send_enabled": False,
+                         "modem_recovery_enabled": True,
                          "scheduled_sms_enabled": KEEPER is not None},
         "modem_available": not snapshot["error"],
-        "status_message": "正在切卡并等待网络注册" if snapshot["busy"] else snapshot["error"],
+        "status_message": "正在操作设备并等待网络注册" if snapshot["busy"] else snapshot["error"],
+        "device_busy": snapshot['busy'],
+        "device_diagnostics": ML307.store.diagnostics(),
         "errors": [s for s in (snapshot["error"], snapshot["notify_error"]) if s],
         "modem": snapshot["modem"],
         "connection": {"apn":"", "username":"", "password":"", "ip_type":"", "network_id":""},
         "services": {"modemmanager":"active" if not snapshot["error"] else "inactive",
                      "sms_forwarder":"active", "web_admin":"active"},
         "notifications": {"configured_count":len(configured),
-                          "configured_labels":configured_channel_labels(configured), "targets":targets},
+                          "configured_labels":configured_channel_labels(configured), "targets":targets,
+                          "delivery": [dict(id=t['id'], label=t['label'], **{
+                              k:v for k,v in ML307.store.notification_state(t).items()
+                              if k in ('blocked', 'error')}) for t in targets]},
         "feishu": FEISHU.snapshot() if FEISHU else {"configured": False},
         "keepalive": keepalive_status_snapshot(profiles),
         "receive_reminders": RECEIVE_REMINDERS.snapshot(profiles) if RECEIVE_REMINDERS else None,

@@ -33,6 +33,7 @@ type Props = {
   logs: ActionEvent[]
   onRefresh: () => void
   onRefreshInbox: () => void
+  onRecover: () => void
   onSwitch: (profile: Profile) => void
   onResendNotification: () => void
   onClearLogs: () => void
@@ -97,11 +98,15 @@ export function ReceiverView({
   status, loading, refreshing, busy, actionLabel, actionTarget,
   autoRefresh, refreshSeconds, onAutoRefreshChange, onRefreshSecondsChange,
   notificationEditor, keepaliveEditor, logs, onRefresh, onRefreshInbox,
-  onSwitch, onResendNotification, onClearLogs,
+  onSwitch, onResendNotification, onClearLogs, onRecover,
 }: Props) {
   const [tab, setTab] = useState("inbox")
   const [query, setQuery] = useState("")
   const [cardFilter, setCardFilter] = useState("all")
+  const [logSource, setLogSource] = useState("device")
+  const visibleLogs = logSource === "device" ? (status?.device_diagnostics ?? []).map((entry) => ({
+    ...entry, time: new Date(entry.time).toLocaleTimeString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" }),
+  })) : logs
   const modem = status?.modem
   const online = status?.modem_available
   const signal = modem?.signal_details
@@ -109,6 +114,9 @@ export function ReceiverView({
   const profiles = status?.profiles ?? []
   const active = profiles.find((profile) => profile.is_active)
   const configured = status?.notifications?.configured_count ?? 0
+  const feishu = status?.feishu
+  const feishuEnabled = Boolean(feishu?.configured && feishu.bound)
+  const forwardingLabels = [...(feishuEnabled ? ["飞书机器人"] : []), ...(status?.notifications?.configured_labels ?? [])]
   const errors = [...new Set([...(status?.errors ?? []), ...(!busy && status?.status_message ? [status.status_message] : [])])]
   const registration = modem?.registration === "roaming" ? "漫游" : modem?.registration === "home" ? "已注册" : "未注册"
   const filterNames = [...new Set(messages.map((sms) => sms.imported ? "未知卡片" : sms.profile_name || "未知卡片"))]
@@ -207,7 +215,7 @@ export function ReceiverView({
               </Card>
               <div className="space-y-5">
                 <Card><CardHeader><CardTitle>快速切卡</CardTitle></CardHeader><CardContent className="space-y-4">{profiles.map((profile) => <div key={profile.iccid} className="flex items-center justify-between gap-3"><div><p className="text-sm font-medium">{profile.display_name}</p><div className="mt-1 text-muted-foreground"><PhoneNumber number={profile.phone_number} label={profile.display_name} /></div></div>{switchButton(profile)}</div>)}{!profiles.length ? <p className="text-sm text-muted-foreground">未读取到卡片</p> : null}</CardContent></Card>
-                <Card><CardHeader><CardTitle>短信转发</CardTitle><CardDescription>{configured ? `${configured} 个通知渠道已启用` : "尚未配置通知渠道"}</CardDescription></CardHeader><CardContent><Button variant="outline" className="w-full" onClick={() => setTab("notifications")}><BellIcon />设置通知渠道</Button></CardContent></Card>
+                <Card><CardHeader><CardTitle>短信转发</CardTitle><CardDescription>{forwardingLabels.length ? `已启用：${forwardingLabels.join("、")}` : "尚未配置通知渠道"}</CardDescription></CardHeader><CardContent><Button variant="outline" className="w-full" onClick={() => setTab("notifications")}><BellIcon />查看通知渠道</Button></CardContent></Card>
               </div>
             </div>
           </TabsContent>
@@ -220,16 +228,17 @@ export function ReceiverView({
 
           <TabsContent value="keepalive">{keepaliveEditor}</TabsContent>
 
-          <TabsContent value="notifications">
-            <Card><CardHeader><CardTitle>通知渠道</CardTitle><CardDescription>将新短信转发到微信、Bark、Telegram 等渠道</CardDescription></CardHeader><CardContent>{notificationEditor}</CardContent><CardFooter className="flex-wrap justify-between gap-3"><span className="text-xs text-muted-foreground">{configured ? `已启用：${status?.notifications?.configured_labels.join("、")}` : "保存渠道后生效"}</span><Button variant="outline" size="sm" disabled={busy || !configured || !messages.length} onClick={onResendNotification}><RefreshCwIcon />重新推送最近一条短信</Button></CardFooter></Card>
+          <TabsContent value="notifications" className="space-y-5">
+            {feishu?.configured ? <Card><CardHeader><CardTitle>飞书机器人</CardTitle><CardDescription>{feishuEnabled ? "新短信自动发送到已绑定的飞书私聊" : "在飞书私聊中发送“绑定 一次性绑定码”完成设置"}</CardDescription><CardAction><Badge variant={feishu.connected ? "secondary" : "outline"}>{feishu.connected ? "已连接" : "连接中"}</Badge></CardAction></CardHeader><CardContent><p className="text-sm text-muted-foreground">{feishuEnabled ? "已绑定 · 可在飞书中查看状态、切卡和恢复设备" : "尚未绑定"}</p></CardContent></Card> : null}
+            <Card><CardHeader><CardTitle>{feishu?.configured ? "其他通知渠道" : "通知渠道"}</CardTitle><CardDescription>按需添加额外的短信转发渠道</CardDescription></CardHeader><CardContent>{notificationEditor}</CardContent><CardFooter className="flex-wrap justify-between gap-3"><span className="text-xs text-muted-foreground">{configured ? `已启用：${status?.notifications?.configured_labels.join("、")}` : "未启用其他渠道"}</span><Button variant="outline" size="sm" disabled={busy || !configured || !messages.length} onClick={onResendNotification}><RefreshCwIcon />重新推送到这些渠道</Button></CardFooter></Card>
           </TabsContent>
 
           <TabsContent value="device" className="space-y-5">
             <div className="grid items-start gap-5 md:grid-cols-2">
-              <Card><CardHeader><CardTitle>设备状态</CardTitle></CardHeader><CardContent><dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-4 text-sm"><dt className="text-muted-foreground">模组连接</dt><dd className="text-right">{online ? "已连接" : "未连接"}</dd><dt className="text-muted-foreground">后台收信</dt><dd className="text-right">{status?.services.sms_forwarder === "active" ? "运行中 · 每 5 秒读取" : "未运行"}</dd><dt className="text-muted-foreground">已保存短信</dt><dd className="text-right">{messages.length} 条</dd><dt className="text-muted-foreground">网页刷新</dt><dd className="text-right">{autoRefresh ? `每 ${refreshSeconds} 秒` : "已暂停"}</dd></dl></CardContent><CardFooter className="gap-2"><Button variant="outline" disabled={busy || !status} onClick={onRefreshInbox}><RefreshCwIcon />重新读取设备</Button><Button variant="outline" disabled title="ML307 尚未适配重启基带">重启基带</Button></CardFooter></Card>
+              <Card><CardHeader><CardTitle>设备状态</CardTitle></CardHeader><CardContent><dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-4 text-sm"><dt className="text-muted-foreground">模组连接</dt><dd className="text-right">{online ? "已连接" : "未连接"}</dd><dt className="text-muted-foreground">后台收信</dt><dd className="text-right">{status?.services.sms_forwarder === "active" ? "运行中 · 每 5 秒读取" : "未运行"}</dd><dt className="text-muted-foreground">已保存短信</dt><dd className="text-right">{messages.length} 条</dd><dt className="text-muted-foreground">网页刷新</dt><dd className="text-right">{autoRefresh ? `每 ${refreshSeconds} 秒` : "已暂停"}</dd></dl></CardContent><CardFooter className="gap-2"><Button variant="outline" disabled={busy || !status} onClick={onRefreshInbox}><RefreshCwIcon />重新读取设备</Button><Button variant="outline" disabled={busy || !status?.capabilities.modem_recovery_enabled} onClick={onRecover} title="重新初始化模组，连接会短暂中断；保留当前卡片">恢复设备</Button></CardFooter></Card>
               <Card><CardHeader><CardTitle>网络与信号</CardTitle></CardHeader><CardContent><dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-3 text-sm">{[["PLMN", modem?.operator_code], ["注册状态", online ? registration : "未注册"], ["网络制式", modem?.access_tech], ["RSRP", signal?.rsrp_text], ["RSRQ", signal?.rsrq_text], ["RSSI", signal?.rssi_text], ["CSQ", signal?.csq == null ? null : `${signal.csq} / 31`]].map(([label, value]) => <div key={label} className="contents"><dt className="text-muted-foreground">{label}</dt><dd className="text-right tabular-nums">{value || "未测得"}</dd></div>)}</dl></CardContent><CardFooter><p className="text-xs text-muted-foreground">手动选网、APN 和短信中心写入尚未适配当前设备。</p></CardFooter></Card>
             </div>
-            <Card><CardHeader><CardTitle className="flex items-center gap-2"><TerminalIcon className="size-4" />操作日志</CardTitle><CardDescription>本次打开页面后的操作记录</CardDescription><CardAction><Button variant="outline" size="sm" disabled={!logs.length || busy} onClick={onClearLogs}>清空显示</Button></CardAction></CardHeader><CardContent>{logs.length ? <div className="max-h-80 space-y-3 overflow-auto rounded-lg bg-muted/50 p-4 font-mono text-xs">{logs.map((line, index) => <div key={index} className="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-3"><span className="text-muted-foreground">{line.time}</span><span className={cn("whitespace-pre-wrap break-words", line.level === "error" && "text-destructive")}>{line.message}</span></div>)}</div> : <p className="py-6 text-center text-sm text-muted-foreground">暂无操作记录</p>}</CardContent></Card>
+            <Card><CardHeader><CardTitle className="flex items-center gap-2"><TerminalIcon className="size-4" />操作日志</CardTitle><CardDescription>{logSource === "device" ? "最近的切卡和恢复记录，刷新页面后保留" : "本次打开页面后的操作记录"}</CardDescription><CardAction className="flex gap-2"><Select value={logSource} onValueChange={(value) => setLogSource(value ?? "device")}><SelectTrigger aria-label="日志范围" className="w-32"><SelectValue>{logSource === "device" ? "设备记录" : "本页操作"}</SelectValue></SelectTrigger><SelectContent><SelectItem value="device">设备记录</SelectItem><SelectItem value="page">本页操作</SelectItem></SelectContent></Select>{logSource === "page" ? <Button variant="outline" size="sm" disabled={!logs.length || busy} onClick={onClearLogs}>清空显示</Button> : null}</CardAction></CardHeader><CardContent>{visibleLogs.length ? <div className="max-h-80 space-y-3 overflow-auto rounded-lg bg-muted/50 p-4 font-mono text-xs">{visibleLogs.map((line, index) => <div key={index} className="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-3"><span className="text-muted-foreground">{line.time}</span><span className={cn("whitespace-pre-wrap break-words", line.level === "error" && "text-destructive")}>{line.message}</span></div>)}</div> : <p className="py-6 text-center text-sm text-muted-foreground">暂无操作记录</p>}</CardContent></Card>
           </TabsContent>
         </Tabs>
       </main>

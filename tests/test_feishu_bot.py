@@ -199,6 +199,43 @@ class BotTests(unittest.TestCase):
         self.assertTrue(any('注册超时' in t for t in texts))
         self.assertFalse(any('完成网络注册' in t for t in texts))
 
+    def test_recovery_command_is_owner_only_and_deduplicated(self):
+        self.status['capabilities'] = {'modem_recovery_enabled':True}
+        self.bind()
+        self.bot.handle(self.message('恢复设备',owner='other'))
+        self.start_action.assert_not_called()
+        command = self.message('恢复设备',message_id='recover-once')
+        self.bot.handle(command)
+        self.bot.handle(command)
+        self.start_action.assert_called_once_with('recover_modem',{},metadata={'kind':'feishu'},reject_if_busy=True)
+        self.bot.monitor_jobs()
+        self.bot.flush()
+        messages = [c.args[2].get('text','') for c in self.api.send.call_args_list]
+        self.assertTrue(any('设备已恢复' in text for text in messages))
+        self.assertFalse(any('已切换到' in text for text in messages))
+
+    def test_recovery_button_is_single_use_and_checks_card_state(self):
+        self.status['capabilities'] = {'modem_recovery_enabled':True}
+        self.bind()
+        callback = self.callback()
+        with self.bot.state.connect() as db:
+            nonce = db.execute("SELECT nonce FROM buttons WHERE action='recover'").fetchone()[0]
+        callback['event']['action']['value']['nonce'] = nonce
+        self.bot.handle(callback,True)
+        self.bot.handle(callback,True)
+        self.start_action.assert_called_once()
+
+    def test_failed_recovery_reports_failure(self):
+        self.status['capabilities'] = {'modem_recovery_enabled':True}
+        self.bind()
+        self.bot.handle(self.message('恢复设备'))
+        self.get_action.return_value = {'state':'error','error':'恢复超时'}
+        self.bot.monitor_jobs()
+        self.bot.flush()
+        messages = [c.args[2].get('text','') for c in self.api.send.call_args_list]
+        self.assertTrue(any('设备恢复未完成：恢复超时' in text for text in messages))
+        self.assertFalse(any('设备已恢复' in text for text in messages))
+
     def test_api_checks_business_error_without_leaking_secret(self):
         api = FeishuAPI({'app_id': 'app', 'app_secret': 'secret'})
         api.session = Mock()

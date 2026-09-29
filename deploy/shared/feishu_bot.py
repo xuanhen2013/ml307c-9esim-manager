@@ -69,6 +69,8 @@ class BotState:
               CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY,kind TEXT,content TEXT,
                 delivered INTEGER DEFAULT 0,retry_at REAL DEFAULT 0);
             ''')
+            if 'kind' not in {r[1] for r in db.execute('PRAGMA table_info(jobs)')}:
+                db.execute("ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'switch'")
             existing = db.execute("SELECT value FROM meta WHERE key='app_id'").fetchone()
             if existing and existing[0] != app_id:
                 raise ValueError('飞书应用与绑定记录不一致')
@@ -130,7 +132,7 @@ class FeishuBot:
             for job in jobs:
                 db.execute("UPDATE jobs SET state='interrupted' WHERE id=?", (job['id'],))
                 db.execute('INSERT OR IGNORE INTO outbox(id,kind,content) VALUES (?,?,?)',
-                           ('job:' + job['id'], 'text', json.dumps({'text': '服务曾重启，切卡结果待确认。发送“状态”查看当前卡。'}, ensure_ascii=False)))
+                           ('job:' + job['id'], 'text', json.dumps({'text': '服务曾重启，设备操作结果待确认。发送“状态”查看当前卡。'}, ensure_ascii=False)))
 
     def snapshot(self):
         return {'configured': True, 'bound': bool(self.owner.get('owner')),
@@ -177,6 +179,8 @@ class FeishuBot:
                 return
             if button['action'] == 'switch':
                 self.switch(button, 'button:' + nonce)
+            elif button['action'] == 'recover':
+                self.recover('button:' + nonce, button['active_iccid'])
             else:
                 self.menu()
             return
@@ -224,8 +228,10 @@ class FeishuBot:
             self.menu()
         elif content in ('号码', '手机号', '/numbers'):
             self.numbers()
+        elif content in ('恢复设备', '/recover'):
+            self.recover('recover:' + message['message_id'])
         else:
-            self.text('发送“状态”查看当前卡、漫游网络和信号；发送“切卡”选择卡片；发送“号码”查看所有卡片手机号。收到的新短信会自动通知。')
+            self.text('发送“状态”查看当前卡、漫游网络和信号；发送“切卡”选择卡片；发送“号码”查看手机号；发送“恢复设备”重新初始化模组，连接会短暂中断。收到的新短信会自动通知。')
 
     def text(self, text, key=None):
         self.state.enqueue(key or str(uuid.uuid4()), 'text', {'text': text})
@@ -268,6 +274,8 @@ class FeishuBot:
         for profile in profiles:
             if not profile.get('is_active'):
                 elements.append(button('切换到 ' + profile_label(profile), 'switch', profile['iccid']))
+        if status.get('capabilities', {}).get('modem_recovery_enabled'):
+            elements.append(button('恢复设备（连接会短暂中断）', 'recover'))
         card = {'schema': '2.0', 'config': {'update_multi': True, 'enable_forward': False},
                 'header': {'title': {'tag': 'plain_text', 'content': '9eSIM'}, 'template': 'blue'},
                 'body': {'direction': 'vertical', 'vertical_spacing': '12px', 'elements': elements}}
@@ -285,7 +293,7 @@ class FeishuBot:
             self.text('这张卡已经在使用。')
             return
         with self.state.connect() as db:
-            db.execute('INSERT INTO jobs VALUES (?,?,?,?)', (key, '', profile_label(target), 'pending'))
+            db.execute('INSERT INTO jobs(id,action_id,name,state) VALUES (?,?,?,?)', (key, '', profile_label(target), 'pending'))
         try:
             action_id = self.start_action('switch_profile', {'iccid': target['iccid']},
                                           metadata={'kind': 'feishu'}, reject_if_busy=True)
@@ -298,6 +306,29 @@ class FeishuBot:
             db.execute('UPDATE jobs SET action_id=? WHERE id=?', (action_id, key))
         self.text('正在切换到 ' + profile_label(target) + '，等待网络注册。')
 
+    def recover(self, key, expected_iccid=None):
+        status = self.get_status()
+        if not status.get('capabilities', {}).get('modem_recovery_enabled'):
+            self.text('当前设备尚未启用软件恢复。')
+            return
+        active = next((p for p in status['profiles'] if p.get('is_active')), {})
+        if expected_iccid is not None and active.get('iccid', '') != expected_iccid:
+            self.text('卡状态已变化，请发送“状态”后重新选择。')
+            return
+        with self.state.connect() as db:
+            db.execute("INSERT INTO jobs(id,action_id,name,state,kind) VALUES (?,?,?,'pending','recover')",
+                       (key, '', '设备恢复'))
+        try:
+            action_id = self.start_action('recover_modem', {}, metadata={'kind':'feishu'}, reject_if_busy=True)
+        except ValueError as exc:
+            with self.state.connect() as db:
+                db.execute("UPDATE jobs SET state='rejected' WHERE id=?", (key,))
+            self.text(str(exc))
+            return
+        with self.state.connect() as db:
+            db.execute('UPDATE jobs SET action_id=? WHERE id=?', (action_id,key))
+        self.text('正在恢复设备，连接会短暂中断；完成后核对原卡和网络状态。')
+
     def monitor_jobs(self):
         with self.state.connect() as db:
             jobs = db.execute("SELECT * FROM jobs WHERE state='pending' AND action_id<>''").fetchall()
@@ -308,8 +339,12 @@ class FeishuBot:
                 result = {'state': 'error', 'error': '任务结果已过期，请查询当前状态'}
             if result['state'] not in ('done', 'error'):
                 continue
-            text = (f'已切换到 {job["name"]} 并完成网络注册。' if result['state'] == 'done'
-                    else '切卡未完成：' + result.get('error', '未知错误'))
+            if job['kind'] == 'recover':
+                text = ('设备已恢复，原卡保持启用并完成网络注册。' if result['state'] == 'done'
+                        else '设备恢复未完成：' + result.get('error', '未知错误'))
+            else:
+                text = (f'已切换到 {job["name"]} 并完成网络注册。' if result['state'] == 'done'
+                        else '切卡未完成：' + result.get('error', '未知错误'))
             self.text(text, 'job:' + job['id'])
             with self.state.connect() as db:
                 db.execute('UPDATE jobs SET state=? WHERE id=?', (result['state'], job['id']))

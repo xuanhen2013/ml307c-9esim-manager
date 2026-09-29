@@ -114,7 +114,7 @@ class SmsTests(unittest.TestCase):
             spec = importlib.util.spec_from_file_location('admin_test', ROOT/'deploy/web_admin/4g_wifi_admin.py')
             admin = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(admin)
-        for action in ('send_test_sms','run_keepalive_task','recover_modem','apply_network_selection','save_profile_smsc'):
+        for action in ('send_test_sms','run_keepalive_task','apply_network_selection','save_profile_smsc'):
             with self.subTest(action=action), self.assertRaises(ValueError):
                 admin.start_action(action, {})
             with self.subTest(sync=action), self.assertRaises(ValueError):

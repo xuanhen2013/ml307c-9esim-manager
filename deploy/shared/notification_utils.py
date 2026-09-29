@@ -194,16 +194,73 @@ def send_apprise_notification(targets: list[dict[str, Any]], title: str, body: s
     if not configured:
         raise RuntimeError("未配置任何启用的通知渠道")
 
-    app = apprise.Apprise()
+    labels = []
     for target in configured:
-        app.add(str(target["url"]))
+        app = apprise.Apprise()
+        if not app.add(str(target['url'])):
+            raise NotificationError('通知地址格式无效，请检查渠道配置', retryable=False)
+        from apprise.plugins.pushplus import NotifyPushplus
+        if isinstance(app[0], NotifyPushplus):
+            send_pushplus(app[0], title, body)
+        else:
+            notify_kwargs: dict[str, Any] = {"title": title, "body": body}
+            icon_path = resolve_notification_icon_path()
+            if icon_path:
+                notify_kwargs["attach"] = icon_path
+            if not app.notify(**notify_kwargs):
+                raise NotificationError('通知服务未确认接收，请检查网络和渠道配置')
+        labels.append(format_channel_label(target))
+    return labels
 
-    notify_kwargs: dict[str, Any] = {"title": title, "body": body}
-    icon_path = resolve_notification_icon_path()
-    if icon_path:
-        notify_kwargs["attach"] = icon_path
 
-    result = app.notify(**notify_kwargs)
-    if not result:
-        raise RuntimeError("Apprise 推送失败")
-    return configured_channel_labels(configured)
+class NotificationError(RuntimeError):
+    def __init__(self, message, *, retryable=True):
+        self.retryable = retryable
+        super().__init__(message)
+
+
+def send_pushplus(service, title, body):
+    """Keep Apprise URL parsing; expose safe business errors instead of a boolean.
+
+    A 200 response acknowledges queuing, not final delivery to the WeChat client.
+    Never log the URL/token, payload, response body, or a requests exception.
+    """
+    import requests
+    from apprise.plugins.pushplus import PUSHPLUS_FORMAT_MAP, PUSHPLUS_FORMAT_DEFAULT
+
+    if len(service.topics) > 1:
+        raise NotificationError('请为每个 PushPlus 群组单独配置渠道，避免部分成功后重复发送', retryable=False)
+    payload = {'token': service.token, 'title': title, 'content': body,
+               'template': PUSHPLUS_FORMAT_MAP.get(service.notify_format, PUSHPLUS_FORMAT_DEFAULT),
+               'channel': service.channel}
+    if service.topics:
+        payload['topic'] = service.topics[0]
+    if service.webhook:
+        payload['webhook'] = service.webhook
+    try:
+        response = requests.post('https://www.pushplus.plus/send', json=payload,
+                                 timeout=(8, 20), allow_redirects=False)
+    except requests.ReadTimeout:
+        raise NotificationError('PushPlus 响应超时，发送结果不确定；已停止自动重试，避免重复通知', retryable=False) from None
+    except requests.RequestException:
+        raise NotificationError('无法连接 PushPlus，请检查 NAS 网络') from None
+    if response.status_code != 200:
+        code = response.status_code
+        raise NotificationError(f'PushPlus HTTP {code}，请检查服务状态', retryable=code >= 500)
+    try:
+        result = response.json()
+        code = result.get('code')
+    except (ValueError, AttributeError):
+        raise NotificationError('PushPlus 响应格式异常，发送结果不确定；已停止自动重试', retryable=False) from None
+    if code == 200:
+        return
+    reasons = {900: '账号使用受限，请到 PushPlus 查看解除限制的时间',
+               905: '账户未进行实名认证，请在 PushPlus 完成认证',
+               903: '用户令牌无效，请检查 PushPlus Token',
+               401: '请求未授权，请检查账号设置', 403: '请求 IP 未授权，请检查白名单',
+               888: '账号积分不足', 999: '服务端验证失败，请到 PushPlus 查看原因',
+               500: '服务暂时异常', 600: '请求数据异常，请检查渠道配置'}
+    detail = reasons.get(code, '服务未确认接收，请到 PushPlus 查看原因')
+    # Unknown server messages can contain secrets. Only known codes and fixed text leave here.
+    shown_code = str(code) if isinstance(code, int) else '未知'
+    raise NotificationError(f'PushPlus {shown_code}：{detail}', retryable=code == 500)

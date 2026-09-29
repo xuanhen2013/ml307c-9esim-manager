@@ -95,7 +95,11 @@ export type StatusData = {
     lpac_installed: boolean
     direct_modem?: boolean
     sms_send_enabled?: boolean
+    modem_recovery_enabled?: boolean
   }
+  device_busy?: boolean
+  device_diagnostics?: ActionEvent[]
+  feishu?: { configured: boolean; bound?: boolean; connected?: boolean }
   modem_available: boolean
   status_message: string
   errors: string[]
@@ -133,6 +137,7 @@ export type StatusData = {
     configured_count: number
     configured_labels: string[]
     targets: NotificationTarget[]
+    delivery?: Array<{ id: string; label: string; blocked: number; error: string }>
   }
   keepalive?: {
     scheduler_enabled?: boolean
@@ -231,6 +236,7 @@ type ActionState = "queued" | "running" | "done" | "error"
 type ActionName =
   | "switch_profile"
   | "recover_modem"
+  | "test_notification"
   | "restart_sms"
   | "resend_last_sms"
   | "send_test_sms"
@@ -1421,6 +1427,7 @@ function App() {
         {notificationTargets.length ? (
           notificationTargets.map((target) => {
             const definition = NOTIFICATION_CHANNEL_DEFINITIONS[target.type]
+            const delivery = status?.notifications?.delivery?.find((item) => item.id === target.id)
             return (
             <div key={target.id} className="rounded-lg border bg-card p-4">
               <div className="flex flex-col gap-4">
@@ -1430,8 +1437,17 @@ function App() {
                       <span className="font-medium">{definition.label}</span>
                     </div>
                     <p className="text-sm text-muted-foreground">{definition.description}</p>
+                    {delivery?.error ? <p className="text-sm text-destructive">{delivery.error}{delivery.blocked ? "；自动重试已停止。处理后请测试通知。" : ""}</p> : null}
                   </div>
                   <div className="flex items-center gap-3">
+                    {directModem ? <Button type="button" size="sm" variant="outline"
+                      disabled={actionBusy || !status?.notifications?.targets.some((item) => item.id === target.id)}
+                      onClick={() => {
+                        if (notificationsDirtyRef.current) { toast.error("请先保存通知渠道"); return }
+                        void runAction("test_notification", { target_id: target.id }, "测试通知")
+                      }}>
+                      测试通知
+                    </Button> : null}
                     <div className="flex items-center gap-2 text-sm text-muted-foreground">
                       <span>启用转发</span>
                       <Switch
@@ -1572,7 +1588,7 @@ function App() {
       status={status}
       loading={isLoadingStatus}
       refreshing={isRefreshing}
-      busy={actionBusy}
+      busy={actionBusy || Boolean(status?.device_busy)}
       actionLabel={shellActionLabel || null}
       actionTarget={activeAction?.target}
       notificationEditor={notificationEditor}
@@ -1598,6 +1614,7 @@ function App() {
       onClearLogs={() => setLogs([])}
       onRefresh={() => { void refreshStatus(false, true) }}
       onRefreshInbox={() => { void runAction("restart_sms", {}, "重新读取设备") }}
+      onRecover={() => { void runAction("recover_modem", {}, "恢复设备") }}
       onSwitch={(profile) => { void runAction("switch_profile", { iccid: profile.iccid }, `切换到 ${profile.display_name}`) }}
       onResendNotification={() => { void runAction("resend_last_sms", {}, "推送最近一条短信") }}
     />
